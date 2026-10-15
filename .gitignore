@@ -1,0 +1,77 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Model 관련
+*.ckpt
+*.safetensors
+*.pth
+*.bin
+models/
+weights/
+
+# VS Code
+.vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+
+# PyCharm / IntelliJ
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Virtual environments
+.venv
+.uv
+
+# env
+.env
+.env.local
+.env.*.local
+*.json
+!pyproject.toml
+!uv.lock
+
+# Docker
+.dockerignore
+*.log
+docker-compose.override.yml
+
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.sys
+*.gcode
+
+
+# Agents
+CLAUDE.md
+AGENTS.md
+.claude
+.serena

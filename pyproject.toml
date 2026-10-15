@@ -1,0 +1,17 @@
+[project]
+name = "just-make-it"
+version = "0.1.0"
+description = "스프린트 AI12기 4팀 고급 프로젝트 - 소상공인 광고 파트너"
+readme = "README.md"
+authors = [
+    { name = "joelchoi85", email = "jymania@naver.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+just-make-it = "just_make_it:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
