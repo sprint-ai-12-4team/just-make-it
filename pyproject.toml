@@ -7,7 +7,9 @@ authors = [
     { name = "joelchoi85", email = "jymania@naver.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "python-dotenv>=1.2.4",
+]
 
 [project.scripts]
 just-make-it = "just_make_it:main"
