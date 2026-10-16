@@ -1,0 +1,42 @@
+# .github/workflows/cd.yml
+name: Backend CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]  # 배포 기준 브랜치
+    paths-ignore:
+      - 'frontend/**'     # 프론트엔드 변경 시에는 이 워크플로우를 실행하지 않음
+      - 'docs/**'
+      - 'README.md'
+      - 'CLAUDE.md'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 1. 대상 VM에 SSH로 접속하여 최신 코드 반영 및 컨테이너 리스타트
+    - name: Deploy to VM via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USERNAME }}
+        key: ${{ secrets.VM_SSH_KEY }}
+        port: ${{ secrets.VM_PORT }}
+        script: |
+          # 프로젝트 디렉토리로 이동
+          cd /home/spai1203/just-make-it
+          
+          # 1. 빌드 중 메모리 부족(OOM) 방지를 위해 Docker 빌드 캐시 및 남은 자원 정리
+          sudo docker builder prune -f
+
+          # Docker Compose를 이용한 빌드 및 무중단/재시작
+          # --build 옵션으로 Dockerfile의 멀티스테이지 빌드 수행 (uv.lock 기반 의존성 설치)
+          # 로컬 GPU 환경(docker-compose.yml)을 반영하여 컨테이너 백그라운드 실행
+          sudo docker compose up -d --build
+          
+          # 안쓰는 이미지 정리 (디스크 용량 확보)
+          sudo docker image prune -f
