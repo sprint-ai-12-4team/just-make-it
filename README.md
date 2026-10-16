@@ -1,5 +1,5 @@
-# just make it - AI 광고 이미지 생성 서비스
-
+![소셜 프리뷰](https://repository-images.githubusercontent.com/1420090534/f4e71eab-df1f-495f-9042-c83ecb2b184c)
+# JUST MAKE IT - AI 광고 이미지 생성 서비스
 > **"Just Make It" 팀의 하이브리드 AI 이미지 생성 및 서빙 플랫폼 프로젝트입니다.**  
 > 본 프로젝트는 GCP L4 GPU 환경의 가성비와 OpenAI API의 안정성을 결합하여 대규모 트래픽(MAU) 대응이 가능한 이미지 생성 아키텍처를 구축합니다.
 
