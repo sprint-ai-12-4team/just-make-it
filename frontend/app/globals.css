@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+/* 모바일에서 버튼 터치 영역 확보 */
+@layer base {
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+}

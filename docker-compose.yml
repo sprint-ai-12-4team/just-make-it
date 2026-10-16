@@ -1,0 +1,58 @@
+# ============================================================
+# just-make-it — Local Development / Test Compose
+# GPU 사용을 위해 NVIDIA Container Toolkit 필요
+# ============================================================
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: just-make-it-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # 로컬 개발 시 필요에 따라 오버라이드
+      - ENVIRONMENT=development
+      # GPU가 없거나 모델 테스트만 할 때 OpenAI만 쓰려면 true
+      # - FORCE_OPENAI_FALLBACK=true
+    volumes:
+      # 코드 핫리로드 (개발용). 프로덕션에서는 제거
+      - ./src:/app/src:ro
+      # 모델 가중치/캐시 유지 (이미지에 넣지 않음)
+      - model-cache:/app/model-cache
+    # GPU 할당 (NVIDIA Container Toolkit 필요)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 개발 시 --reload 사용. 프로덕션 Dockerfile CMD는 --workers 1 고정
+    command: >
+      uvicorn just_make_it.serving.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 1
+      --reload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  model-cache:
+    # 로컬에 모델 캐시를 남기고 싶을 때 named volume 사용
+    # 필요 시 아래처럼 호스트 경로로 변경 가능:
+    # driver: local
+    # driver_opts:
+    #   type: none
+    #   o: bind
+    #   device: ./models
