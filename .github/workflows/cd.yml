@@ -32,6 +32,8 @@ jobs:
           # 프로젝트 디렉토리로 이동
           cd /home/spai1203/just-make-it
 
+          git config --global --add safe.directory /home/spai1203/just-make-it
+          git config core.filemode false
           git fetch origin
 
           BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\heads\///')
