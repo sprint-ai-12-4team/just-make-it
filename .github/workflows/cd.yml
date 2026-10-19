@@ -32,6 +32,13 @@ jobs:
           # 프로젝트 디렉토리로 이동
           cd /home/spai1203/just-make-it
 
+          git fetch origin
+
+          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\heads\///')
+          echo "Deploying branch: $BRANCH_NAME"
+          git checkout -f $BRANCH_NAME
+          git pull origin $BRANCH_NAME
+
           # 1. 빌드 중 메모리 부족(OOM) 방지를 위해 Docker 빌드 캐시 및 남은 자원 정리
           sudo docker builder prune -f
 
