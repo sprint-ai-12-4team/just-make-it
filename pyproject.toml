@@ -7,7 +7,10 @@ authors = [
     { name = "joelchoi85", email = "jymania@naver.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "openai>=3.35.1",
+    "python-dotenv>=1.2.4",
+]
 
 [project.scripts]
 just-make-it = "just_make_it:main"
@@ -15,3 +18,8 @@ just-make-it = "just_make_it:main"
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
