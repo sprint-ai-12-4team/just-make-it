@@ -3,7 +3,9 @@ name: Backend CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]  # 배포 기준 브랜치
+    branches:
+      - "main"  # 배포 기준 브랜치
+      - "dev"
     paths-ignore:
       - 'frontend/**'     # 프론트엔드 변경 시에는 이 워크플로우를 실행하지 않음
       - 'docs/**'
@@ -29,7 +31,7 @@ jobs:
         script: |
           # 프로젝트 디렉토리로 이동
           cd /home/spai1203/just-make-it
-          
+
           # 1. 빌드 중 메모리 부족(OOM) 방지를 위해 Docker 빌드 캐시 및 남은 자원 정리
           sudo docker builder prune -f
 
@@ -37,6 +39,6 @@ jobs:
           # --build 옵션으로 Dockerfile의 멀티스테이지 빌드 수행 (uv.lock 기반 의존성 설치)
           # 로컬 GPU 환경(docker-compose.yml)을 반영하여 컨테이너 백그라운드 실행
           sudo docker compose up -d --build
-          
+
           # 안쓰는 이미지 정리 (디스크 용량 확보)
           sudo docker image prune -f

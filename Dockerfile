@@ -4,7 +4,7 @@
 # ============================================================
 
 # ----- Stage 1: Builder (의존성 설치) -----
-FROM python:3.11-slim AS builder
+FROM astral/uv:python3.11-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -13,9 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
-# uv 설치
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # 의존성 파일만 먼저 복사 (레이어 캐시 활용)
 COPY pyproject.toml uv.lock ./
