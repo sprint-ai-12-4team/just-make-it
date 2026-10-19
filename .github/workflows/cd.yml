@@ -36,7 +36,7 @@ jobs:
           git config core.filemode false
           git fetch origin
 
-          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\heads\///')
+          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
           echo "Deploying branch: $BRANCH_NAME"
           git checkout -f $BRANCH_NAME
           git pull origin $BRANCH_NAME
