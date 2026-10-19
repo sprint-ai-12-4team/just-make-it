@@ -77,3 +77,6 @@ AGENTS.md
 .serena
 # 정성평가 생성 이미지 (용량이 커서 제외, results.csv와 report.html만 공유)
 src/just_make_it/core/evaluation/results/*/images/
+
+# 서빙 결과 이미지 (로컬 저장소)
+outputs/
