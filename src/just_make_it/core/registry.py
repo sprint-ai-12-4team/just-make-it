@@ -25,7 +25,7 @@ DEFAULT_IMAGE_BACKEND = config.DEFAULT_IMAGE_BACKEND
 
 # 광고 문구 추천에 쓰는 텍스트 모델 목록
 TEXT_MODELS = {
-    "gpt-5.4-mini": partial(OpenAITextModel, model="gpt-5.4-mini"),
+    "gpt-5.6-luna": partial(OpenAITextModel, model="gpt-5.6-luna"),
 }
 
 DEFAULT_TEXT_BACKEND = config.DEFAULT_TEXT_BACKEND
