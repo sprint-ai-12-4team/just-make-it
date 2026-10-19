@@ -75,3 +75,5 @@ CLAUDE.md
 AGENTS.md
 .claude
 .serena
+# 정성평가 생성 이미지 (용량이 커서 제외, results.csv와 report.html만 공유)
+src/just_make_it/core/evaluation/results/*/images/
