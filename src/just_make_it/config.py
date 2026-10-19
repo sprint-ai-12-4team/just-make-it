@@ -11,7 +11,9 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1-mini")
-OPENAI_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "low")
+OPENAI_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "medium")
 
-DEFAULT_IMAGE_BACKEND = os.getenv("DEFAULT_IMAGE_BACKEND", "openai")
+DEFAULT_IMAGE_BACKEND = os.getenv("DEFAULT_IMAGE_BACKEND", "gpt-image-2.5-flare")
+
+# 광고 문구 추천용 텍스트 모델
+DEFAULT_TEXT_BACKEND = os.getenv("DEFAULT_TEXT_BACKEND", "gpt-5.4-mini")
