@@ -16,7 +16,7 @@ class OpenAITextModel(BaseTextModel):
 
     name = "openai-text"
 
-    def __init__(self, model="gpt-5.4-mini"):
+    def __init__(self, model="gpt-5.6-luna"):
         """모델 이름을 정하고 클라이언트를 만듭니다.
 
         Args:
