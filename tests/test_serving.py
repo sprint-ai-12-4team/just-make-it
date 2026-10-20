@@ -73,6 +73,17 @@ class FakeCoreModel(BaseImageModel):
         )
 
 
+@pytest.fixture(autouse=True)
+def isolate_env(monkeypatch):
+    """개인 .env 값이 테스트에 섞이지 않게 서빙 설정 환경 변수를 비운다.
+
+    core의 config.py가 import 시점에 .env를 os.environ에 올리기 때문에,
+    ServingSettings(_env_file=None)만으로는 IMAGE_BACKEND 등이 그대로 읽힌다.
+    """
+    for name in ServingSettings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
 @pytest.fixture
 def fake_core(monkeypatch):
     FakeCoreModel.calls = []
