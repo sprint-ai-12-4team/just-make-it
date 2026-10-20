@@ -73,7 +73,6 @@
 | `purpose` | string | ✅ | | 광고 목적 |
 | `product_name` | string | ✅ | | 가게·상품 이름 |
 | `message` | string | ✅ | | 이미지에 넣을 문구 (`/copies` 결과를 써도 됨) |
-| `generation_mode` | string | | `quick` | 생성 방식. `quick`만 이미지 안에 글자를 넣음 |
 | `style` | string | | `null` | 분위기 칩 값 |
 | `adjustments` | string[] | | `[]` | "조금 수정하기" 칩 값 |
 | `parent_id` | string | | `null` | 다시 만들기·수정할 때 원본 결과의 `id` |
@@ -88,7 +87,6 @@
   "purpose": "instagram",
   "product_name": "소금빵",
   "message": "신메뉴 출시",
-  "generation_mode": "quick",
   "style": "따뜻한",
   "adjustments": [],
   "parent_id": null
@@ -113,7 +111,7 @@
 |------|------|
 | `id` | 결과 ID (uuid). 다시 만들기의 `parent_id`, 결과 조회에 사용 |
 | `image_url` | 이미지 주소. 다운로드·링크 복사에 그대로 사용 |
-| `message` | 실제로 쓴 문구. `텍스트 짧게`를 고르면 줄어든 문구가 옴 → `canvas` 모드는 이 값을 화면에 얹음 |
+| `message` | 실제로 쓴 문구. `텍스트 짧게`를 고르면 줄어든 문구가 옴 → 프론트가 이 값을 이미지 위에 얹음 |
 | `source` | `local` (GPU) 또는 `openai`. 통계용, 화면 노출 금지 |
 
 > 단일 이미지는 **동기 응답**입니다 (보통 10~30초). 로컬 GPU가 바쁘면 서버가 OpenAI로 바로 넘기므로 폴링하지 않습니다.
@@ -136,7 +134,7 @@
   "height": 1024,
   "parent_id": null,
   "created_at": "2026-10-20T09:30:00.000Z",
-  "input": {"purpose": "instagram", "product_name": "소금빵", "message": "신메뉴 출시", "generation_mode": "quick", "style": "따뜻한", "adjustments": []}
+  "input": {"purpose": "instagram", "product_name": "소금빵", "message": "신메뉴 출시", "style": "따뜻한", "adjustments": []}
 }
 ```
 
@@ -196,7 +194,7 @@
 | 페이지 `status` | `processing` (진행 중) · `success` (모든 섹션 끝남. 일부 섹션이 `error`일 수 있음) · `error` (문구 생성 실패 등 전체 실패) |
 | 섹션 `status` | `pending` (문구 대기) → `processing` (문구 완료, 이미지 생성 중) → `success` · `error` |
 | 섹션 `role` | `hero` · `feature` · `closing` |
-| `title`, `body` | canvas에 얹을 문구. 이미지에는 글자가 들어가지 않음 |
+| `title`, `body` | 프론트가 이미지 위에 얹을 문구 |
 
 - 2분이 지나도 `processing`이면 프론트는 "조금 더 걸리고 있어요" 안내 + 새로고침 버튼을 보여줌.
 - 없는 `id`면 `404`.
@@ -247,13 +245,13 @@
 | `kakao` | 카카오톡 · 문자 | 1024×1536 |
 | `free` | 자유롭게 만들기 | 1024×1024 |
 
-### `generation_mode` — 생성 방식
+### 글자 처리 — 이미지 위에 얹기 (2026-10-20 결정)
 
-| 값 | 화면 이름 | 동작 |
-|----|-----------|------|
-| `quick` | 빠른 생성 (기본) | 글자까지 한 장에 생성 |
-| `template` | 템플릿 사용 | 글자 없는 이미지 생성 → 템플릿에 문구 삽입 |
-| `canvas` | 직접 편집 | 글자 없는 이미지 생성 → 웹에서 문구 배치 |
+- **이미지 모델은 글자 없는 이미지만 만듦.** 문구는 프론트가 `<canvas>`로 이미지 위에 얹고, 다운로드도 합친 결과를 저장
+- 이유: 로컬 모델은 한글을 못 그림 → 어느 구성안(`pipeline_options.md`)이든 같은 화면으로 동작. 문구 수정은 재생성 없이 즉시
+- 그래서 `generation_mode`(quick·template·canvas)는 **삭제**. 글자 위치·크기는 프론트 설정 (서버로 안 보냄)
+- 이미지 프롬프트에 "no text, no letters"를 넣어야 함 — 모델
+- `image_url`은 프론트가 canvas로 읽으므로 저장소에 **CORS 허용**(`GET`, 프론트 도메인) 필요 — 서비스
 
 ### `style` — 분위기 칩
 
@@ -264,8 +262,7 @@
 
 | 값 | 비고 |
 |----|------|
-| `글자 더 크게` | `quick`에서만 적용 |
-| `텍스트 짧게` | 문구를 먼저 줄임. `quick`은 줄인 문구로 재생성, 나머지는 응답 `message`로 전달 |
+| `텍스트 짧게` | 문구를 줄여 응답 `message`로 전달 (이미지는 새로 생성) |
 | `더 밝게` | |
 | `배경 단순하게` | |
 
@@ -275,9 +272,10 @@
 
 - [ ] 상세페이지 섹션 수(5)·섹션 이미지 크기 확정 — PM·모델
 - [ ] 상세페이지 작업 실행 방식 (FastAPI `BackgroundTasks` vs 별도 대기열), 서버 재시작 시 진행 중이던 작업 처리 — 서빙
-- [ ] 상세페이지 저장 구조 (`generations`에 섹션별 행 + `parent_id`로 묶기 vs 테이블 추가) — 서비스·PM
+- [x] 상세페이지 저장 구조 → `detail_pages` 테이블 + 섹션 이미지는 `generations` 행 (`detail_page_id`, `section_index`). `docs/schema.sql` 참고 (코드가 읽는 위치는 `service/schema.sql`로 이동 예정)
 - [ ] 이미지 모델 선택 필드(`model`)와 `GET /models` — `pipeline_options.md` 결정 후 `/generate`·섹션 재생성에 함께 추가
-- [ ] `image_url` 저장소 (GCS / R2 / Supabase) 및 URL 만료 정책 — 서비스
+- [x] 저장소 → **VM 로컬 디스크** (DB: SQLite, 이미지: `$DATA_DIR/images`, `/images/{id}.png`로 제공, 만료 없음). 코드 `service/db.py`, `service/storage.py`
 - [ ] 일일 생성 한도 값, 비로그인 허용 여부 — PM
 - [ ] 참고 사진 최대 크기 10MB 확정 — 서빙·모델
 - [ ] 프리미엄(OpenAI 강제) 요청 필드 필요 여부 — PM·서비스
+- [ ] 다시 만들기 때 원본 참고 사진: 조회 응답에 사진이 없어 프론트가 다시 못 보냄 → 서버가 `parent_id`의 `reference_image_path`를 재사용 — 서빙
