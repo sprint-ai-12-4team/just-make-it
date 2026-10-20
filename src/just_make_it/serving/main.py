@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .copywriter import CopyWriter, CoreCopyWriter, MockCopyWriter
 from .generators import Generators, build_generators
 from .queue_manager import QueueManager
 from .router import router
@@ -29,13 +30,18 @@ def create_app(
     settings: ServingSettings | None = None,
     generators: Generators | None = None,
     result_store: ResultStore | None = None,
+    copywriter: CopyWriter | None = None,
 ) -> FastAPI:
-    """앱을 만든다. 테스트에서는 설정·생성기·저장소를 갈아 끼울 수 있다."""
+    """앱을 만든다. 테스트에서는 설정·생성기·저장소·문구 생성기를 갈아 끼울 수 있다."""
     settings = settings or get_serving_settings()
     primary, fallback, premium = generators or build_generators(settings)
     store = result_store or LocalResultStore(
         settings.result_dir, settings.public_base_url
     )
+    if copywriter is None:
+        copywriter = (
+            MockCopyWriter() if settings.image_backend == "mock" else CoreCopyWriter()
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -54,6 +60,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.copywriter = copywriter
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

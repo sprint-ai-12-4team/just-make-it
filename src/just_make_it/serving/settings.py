@@ -47,8 +47,15 @@ class ServingSettings(BaseSettings):
     daily_job_limit: int = 300  # 하루 전체 생성 요청 수
     extra_daily_limit: int = 100  # 그중 Fallback·프리미엄 호출 수
 
+    # ----- 타임아웃 -----
+    # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리
+    # (Flare 평균 17~20초, "텍스트 짧게"는 문구 모델 호출까지 포함)
+    generation_timeout_seconds: float = 90.0
+    # 문구 추천(/copies) 제한 시간(초)
+    copy_timeout_seconds: float = 30.0
+
     # ----- 응답 -----
-    # /generate가 결과를 기다려 주는 최대 시간(초). 넘으면 202 + job_id
+    # /generate가 결과를 기다려 주는 최대 시간(초). 넘으면 202 + id
     generate_wait_seconds: float = 60.0
     job_ttl_seconds: int = 60 * 60  # 완료된 작업 기록 보관 시간
 

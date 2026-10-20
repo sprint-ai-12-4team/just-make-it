@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 
-from ..schemas import GenerationOutput, GenerationSource, GenerationSpec
+from ..schemas import GenerationOutput, GenerationSpec, Source
 
 
 class GeneratorError(RuntimeError):
@@ -27,8 +27,8 @@ class ImageGenerator(ABC):
     name: str
 
     @property
-    def source(self) -> GenerationSource:
-        """실제로 이미지를 만드는 곳 (응답의 generation_source)."""
+    def source(self) -> Source:
+        """실제로 이미지를 만드는 곳 (응답의 source)."""
         return "local"
 
     def load(self) -> None:  # noqa: B027 - 선택 구현 훅

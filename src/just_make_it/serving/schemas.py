@@ -1,6 +1,6 @@
 """서빙 API 요청·응답 스키마.
 
-필드명은 프론트엔드 `frontend/lib/types.ts`와 core `generate_ad_image()` 인자에 맞춘다.
+필드명과 값은 PM API 스펙(`docs/api_spec.md`)과 core `generate_ad_image()` 인자에 맞춘다.
 """
 
 from dataclasses import dataclass, field
@@ -11,32 +11,37 @@ from pydantic import BaseModel, Field, field_validator
 
 Purpose = Literal["instagram", "commerce", "youtube", "kakao", "free"]
 GenerationMode = Literal["quick", "template", "canvas"]
-# 실제로 이미지를 만든 곳: openai(OpenAI API), local(VM 모델), mock(개발용)
-GenerationSource = Literal["local", "openai", "mock"]
-# 서버가 고른 경로: primary(기본), fallback(대기·장애 우회), premium(유저 선택)
+# 실제로 이미지를 만든 곳: openai(OpenAI API), local(VM 모델), mock(개발용). 통계용
+Source = Literal["local", "openai", "mock"]
+# 서버가 고른 경로: primary(기본), fallback(대기·장애 우회), premium(유저 선택). 통계용
 Route = Literal["primary", "fallback", "premium"]
+
+
+def _strip_text(value: object) -> object:
+    # 검증 전에 공백을 지워서 "   " 같은 입력이 필수값 검사를 통과하지 못하게 한다
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
 
 
 class GenerateRequest(BaseModel):
     """POST /generate 요청 본문 (JSON 또는 multipart 폼 필드)."""
 
     purpose: Purpose
-    product_name: str = Field(min_length=1)
-    message: str = Field(min_length=1)
-    style: str | None = None
+    product_name: str
+    message: str
     generation_mode: GenerationMode = "quick"
+    style: str | None = None
     # 결과 화면의 "조금 수정하기" 칩 (예: ["더 밝게", "텍스트 짧게"])
     adjustments: list[str] = Field(default_factory=list, max_length=10)
-    # 유저가 "고품질로 만들기"를 고른 경우
+    # 다시 만들기·수정할 때 원본 결과의 id
+    parent_id: str | None = Field(default=None, max_length=64)
+    # 고품질 모드 (스펙 미결 사항. 서버에 프리미엄 모델이 설정됐을 때만 적용)
     premium: bool = False
 
-    @field_validator("product_name", "message", "style", mode="before")
-    @classmethod
-    def _strip(cls, value: object) -> object:
-        # 검증 전에 공백을 지워서 "   " 같은 입력이 필수값 검사를 통과하지 못하게 한다
-        if isinstance(value, str):
-            return value.strip() or None
-        return value
+    _strip = field_validator("product_name", "message", "style", mode="before")(
+        _strip_text
+    )
 
     @field_validator("adjustments", mode="before")
     @classmethod
@@ -46,36 +51,80 @@ class GenerateRequest(BaseModel):
         return value
 
 
+class CopiesRequest(BaseModel):
+    """POST /copies 요청 본문."""
+
+    product_name: str
+    message: str
+    style: str | None = None
+
+    _strip = field_validator("product_name", "message", "style", mode="before")(
+        _strip_text
+    )
+
+
+class CopiesResponse(BaseModel):
+    copies: list[str]
+
+
 class JobState(StrEnum):
+    """작업 내부 상태. API에는 processing / success / error 세 가지로 보인다."""
+
     QUEUED = "queued"
     RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
+    SUCCEEDED = "success"
+    FAILED = "error"
 
 
 class GenerateSuccessResponse(BaseModel):
+    """생성 완료 (POST /generate 200)."""
+
+    id: str
     status: Literal["success"] = "success"
-    job_id: str
     image_url: str
-    generation_source: GenerationSource
-    route: Route
     # 이미지에 실제로 쓴 문구 ("텍스트 짧게"를 누르면 줄어든 문구)
     message: str
-    model: str
+    source: Source
+    width: int
+    height: int
+    route: Route
 
 
 class GenerateProcessingResponse(BaseModel):
+    """아직 생성 중 (POST /generate 202)."""
+
+    id: str
     status: Literal["processing"] = "processing"
-    job_id: str
-    stage: Literal["queued", "running"]
     queue_position: int | None = None
     estimated_wait_seconds: float | None = None
 
 
-class JobFailedResponse(BaseModel):
-    status: Literal["failed"] = "failed"
-    job_id: str
-    error: str
+class GenerationInput(BaseModel):
+    purpose: str
+    product_name: str
+    message: str
+    generation_mode: str
+    style: str | None
+    adjustments: list[str]
+
+
+class GenerationResponse(BaseModel):
+    """결과 조회 (GET /generations/{id}). status에 따라 채워지는 필드가 다르다."""
+
+    id: str
+    status: Literal["processing", "success", "error"]
+    image_url: str | None = None
+    message: str | None = None
+    source: Source | None = None
+    width: int | None = None
+    height: int | None = None
+    route: Route
+    queue_position: int | None = None
+    estimated_wait_seconds: float | None = None
+    error: str | None = None
+    parent_id: str | None
+    created_at: str
+    input: GenerationInput
 
 
 class HealthResponse(BaseModel):
@@ -115,3 +164,6 @@ class GenerationOutput:
     image_bytes: bytes  # PNG
     message: str
     model: str
+    width: int
+    height: int
+    prompt: str | None = None

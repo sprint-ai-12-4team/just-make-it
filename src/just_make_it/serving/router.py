@@ -1,22 +1,34 @@
-"""서빙 API 엔드포인트."""
+"""서빙 API 엔드포인트. PM API 스펙(`docs/api_spec.md`)을 따른다."""
 
+import asyncio
 import io
 import json
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
-from .queue_manager import DailyLimitError, Job, QueueFullError, QueueManager
+from .copywriter import CopyInputError, CopyWriter
+from .generators import GeneratorError
+from .queue_manager import (
+    ERROR_GENERIC,
+    DailyLimitError,
+    Job,
+    QueueFullError,
+    QueueManager,
+)
 from .schemas import (
+    CopiesRequest,
+    CopiesResponse,
     GenerateProcessingResponse,
     GenerateRequest,
     GenerateSuccessResponse,
+    GenerationInput,
+    GenerationResponse,
     GenerationSpec,
     HealthResponse,
-    JobFailedResponse,
     JobState,
 )
 from .settings import ServingSettings
@@ -24,6 +36,15 @@ from .settings import ServingSettings
 router = APIRouter()
 
 MAX_REFERENCE_SIDE = 2048  # 업로드 사진은 이 크기 이하로 줄여 메모리를 아낀다
+ALLOWED_REFERENCE_FORMATS = {"PNG", "JPEG", "WEBP"}
+REQUIRED_TEXT_FIELDS = {"product_name", "message"}
+
+MSG_REQUIRED = "상품 이름과 핵심 메시지는 꼭 입력해야 합니다."
+MSG_NOT_FOUND = "결과를 찾을 수 없어요."
+MSG_TOO_LARGE = "사진은 10MB 이하로 올려 주세요."
+MSG_BAD_FORMAT = "참고 사진은 PNG, JPG, WEBP 파일만 사용할 수 있습니다."
+MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
+MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
 
 
 def _manager(request: Request) -> QueueManager:
@@ -34,88 +55,19 @@ def _settings(request: Request) -> ServingSettings:
     return request.app.state.settings
 
 
-# ---------------------------------------------------------------------- /generate
-@router.post(
-    "/generate",
-    responses={
-        200: {"model": GenerateSuccessResponse, "description": "대기 시간 안에 완료"},
-        202: {"model": GenerateProcessingResponse, "description": "아직 생성 중"},
-        422: {"description": "입력 오류"},
-        429: {"description": "하루 생성 한도 도달"},
-        502: {"model": JobFailedResponse, "description": "생성 실패"},
-        503: {"description": "대기열 가득 참"},
-    },
-)
-async def generate(
-    request: Request,
-    wait: float | None = Query(
-        default=None,
-        ge=0,
-        description="결과를 기다려 줄 최대 시간(초). 0이면 바로 job_id를 반환",
-    ),
-):
-    """광고 이미지 생성을 요청한다.
-
-    - `application/json` 또는 `multipart/form-data`(참고 사진 `reference_image` 포함)
-    - `wait`초 안에 끝나면 `success`, 아니면 202 `processing` + `job_id`를 반환한다.
-      이후 `GET /jobs/{job_id}`로 상태를 조회한다.
-    """
-    settings = _settings(request)
-    body, reference = await _parse_body(request, settings)
-
-    try:
-        payload = GenerateRequest.model_validate(body)
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=_validation_message(exc)) from exc
-    _check_lengths(payload, settings)
-
-    spec = GenerationSpec(
-        product_name=payload.product_name,
-        message=payload.message,
-        purpose=payload.purpose,
-        style=payload.style,
-        generation_mode=payload.generation_mode,
-        adjustments=payload.adjustments,
-        reference_image=reference,
-    )
-
-    manager = _manager(request)
-    try:
-        job = await manager.submit(spec, premium=payload.premium)
-    except QueueFullError as exc:
-        raise HTTPException(
-            status_code=503, detail="지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
-        ) from exc
-    except DailyLimitError as exc:
-        raise HTTPException(
-            status_code=429,
-            detail="오늘 만들 수 있는 횟수를 다 썼어요. 내일 다시 이용해 주세요.",
-        ) from exc
-
-    timeout = settings.generate_wait_seconds if wait is None else wait
-    await manager.wait(job, min(timeout, settings.generate_wait_seconds))
-    return _job_response(manager, job, for_generate=True)
+def _copywriter(request: Request) -> CopyWriter:
+    return request.app.state.copywriter
 
 
-# ---------------------------------------------------------------------- /jobs/{id}
-@router.get(
-    "/jobs/{job_id}",
-    response_model=GenerateSuccessResponse
-    | GenerateProcessingResponse
-    | JobFailedResponse,
-)
-async def get_job(request: Request, job_id: str):
-    """작업 상태를 조회한다. 프론트는 1~2초 간격으로 폴링한다."""
-    manager = _manager(request)
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="작업을 찾을 수 없어요.")
-    return _job_response(manager, job, for_generate=False)
+def _client_id(value: str | None) -> str:
+    value = (value or "").strip()
+    return value[:64] if value else "anonymous"
 
 
 # ---------------------------------------------------------------------- /health
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
+    """서버 상태. docker healthcheck는 HTTP 200 여부만 본다."""
     manager = _manager(request)
     settings = _settings(request)
     return HealthResponse(
@@ -136,57 +88,181 @@ async def health(request: Request) -> HealthResponse:
     )
 
 
-# ---------------------------------------------------------------------- 보조 함수
-def _job_response(manager: QueueManager, job: Job, *, for_generate: bool):
-    if job.state == JobState.SUCCEEDED:
-        return GenerateSuccessResponse(
-            job_id=job.id,
-            image_url=job.image_url or "",
-            generation_source=job.source or "local",
-            route=job.route,
-            message=job.message or job.spec.message,
-            model=job.model or "",
+# ---------------------------------------------------------------------- /copies
+@router.post(
+    "/copies",
+    response_model=CopiesResponse,
+    responses={400: {"description": "필수값 누락"}, 503: {"description": "생성 실패"}},
+)
+async def copies(request: Request) -> CopiesResponse:
+    """홍보 문구 후보를 최대 3개 추천한다."""
+    body = await _read_json(request)
+    payload = _validate(CopiesRequest, body)
+    settings = _settings(request)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                _copywriter(request).suggest,
+                payload.product_name,
+                payload.message,
+                payload.style,
+            ),
+            timeout=settings.copy_timeout_seconds,
         )
-    if job.state == JobState.FAILED:
-        body = JobFailedResponse(job_id=job.id, error=job.error or "")
-        if for_generate:
-            return JSONResponse(status_code=502, content=body.model_dump())
-        return body
+    except CopyInputError as exc:
+        raise HTTPException(status_code=400, detail=MSG_REQUIRED) from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return CopiesResponse(copies=result[:3])
 
-    body = GenerateProcessingResponse(
-        job_id=job.id,
-        stage="running" if job.state == JobState.RUNNING else "queued",
+
+# ---------------------------------------------------------------------- /generate
+@router.post(
+    "/generate",
+    responses={
+        200: {"model": GenerateSuccessResponse, "description": "생성 완료"},
+        202: {"model": GenerateProcessingResponse, "description": "아직 생성 중"},
+        400: {"description": "필수값 누락"},
+        413: {"description": "사진 10MB 초과"},
+        415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
+        429: {"description": "하루 생성 한도 초과"},
+        503: {"description": "생성 실패 또는 요청 과다"},
+    },
+)
+async def generate(
+    request: Request,
+    x_client_id: str | None = Header(default=None),
+    wait: float | None = Query(
+        default=None,
+        ge=0,
+        description="결과를 기다려 줄 최대 시간(초). 0이면 바로 202 + id",
+    ),
+):
+    """광고 이미지를 생성한다 (다시 만들기·수정 포함).
+
+    - `application/json`, 참고 사진이 있으면 `multipart/form-data`(`reference_image`)
+    - 기본은 동기 응답. 대기열이 길어 `wait`초 안에 끝나지 않으면 202 + `id`를 주고,
+      프론트는 `GET /generations/{id}`로 확인한다.
+    """
+    settings = _settings(request)
+    body, reference = await _parse_generate_body(request, settings)
+    payload = _validate(GenerateRequest, body)
+    _check_lengths(payload, settings)
+
+    spec = GenerationSpec(
+        product_name=payload.product_name,
+        message=payload.message,
+        purpose=payload.purpose,
+        style=payload.style,
+        generation_mode=payload.generation_mode,
+        adjustments=payload.adjustments,
+        reference_image=reference,
+    )
+
+    manager = _manager(request)
+    try:
+        job = await manager.submit(
+            spec,
+            premium=payload.premium,
+            client_id=_client_id(x_client_id),
+            parent_id=payload.parent_id,
+        )
+    except QueueFullError as exc:
+        raise HTTPException(status_code=503, detail=MSG_BUSY) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+
+    timeout = settings.generate_wait_seconds if wait is None else wait
+    await manager.wait(job, min(timeout, settings.generate_wait_seconds))
+
+    if job.state == JobState.SUCCEEDED:
+        return _success(job)
+    if job.state == JobState.FAILED:
+        status_code = 400 if job.input_error else 503
+        return JSONResponse(status_code=status_code, content={"detail": job.error})
+    processing = GenerateProcessingResponse(
+        id=job.id,
         queue_position=manager.queue_position(job),
         estimated_wait_seconds=manager.estimated_wait(job),
     )
-    if for_generate:
-        return JSONResponse(status_code=202, content=body.model_dump())
-    return body
+    return JSONResponse(status_code=202, content=processing.model_dump())
 
 
-async def _parse_body(
-    request: Request, settings: ServingSettings
-) -> tuple[dict, bytes | None]:
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith(
-        ("multipart/form-data", "application/x-www-form-urlencoded")
-    ):
-        form = await request.form()
-        body: dict = {}
-        adjustments: list[str] = []
-        reference: bytes | None = None
-        for key, value in form.multi_items():
-            if key == "reference_image":
-                if isinstance(value, UploadFile) and value.filename:
-                    reference = await _read_reference(value, settings)
-            elif key == "adjustments" and isinstance(value, str):
-                adjustments.extend(_split_adjustments(value))
-            elif isinstance(value, str):
-                body[key] = value
-        if adjustments:
-            body["adjustments"] = adjustments
-        return body, reference
+# ---------------------------------------------------------------------- /generations
+@router.get("/generations/{generation_id}", response_model=GenerationResponse)
+async def get_generation(request: Request, generation_id: str) -> GenerationResponse:
+    """생성 결과를 다시 조회한다. 폴링 간격은 1~2초를 권장한다.
 
+    DB가 붙기 전까지는 완료 후 1시간 동안만 메모리에 보관한다.
+    """
+    manager = _manager(request)
+    job = manager.get(generation_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+
+    spec = job.spec
+    response = GenerationResponse(
+        id=job.id,
+        status="processing",
+        route=job.route,
+        parent_id=job.parent_id,
+        created_at=job.created_at,
+        input=GenerationInput(
+            purpose=spec.purpose,
+            product_name=spec.product_name,
+            message=spec.message,
+            generation_mode=spec.generation_mode,
+            style=spec.style,
+            adjustments=spec.adjustments,
+        ),
+    )
+    if job.state == JobState.SUCCEEDED:
+        response.status = "success"
+        response.image_url = job.image_url
+        response.message = job.message
+        response.source = job.source
+        response.width, response.height = job.width, job.height
+    elif job.state == JobState.FAILED:
+        response.status = "error"
+        response.error = job.error
+    else:
+        response.queue_position = manager.queue_position(job)
+        response.estimated_wait_seconds = manager.estimated_wait(job)
+    return response
+
+
+# ---------------------------------------------------------------------- 보조 함수
+def _success(job: Job) -> GenerateSuccessResponse:
+    return GenerateSuccessResponse(
+        id=job.id,
+        image_url=job.image_url or "",
+        message=job.message or job.spec.message,
+        source=job.source or "local",
+        width=job.width or 0,
+        height=job.height or 0,
+        route=job.route,
+    )
+
+
+def _validate(model, body: dict):
+    """필수 문구가 비었으면 400, 그 밖의 타입·허용값 오류는 422 (스펙 4장)."""
+    try:
+        return model.model_validate(body)
+    except ValidationError as exc:
+        missing = {
+            str(err["loc"][0])
+            for err in exc.errors()
+            if err["loc"] and str(err["loc"][0]) in REQUIRED_TEXT_FIELDS
+        }
+        if missing:
+            raise HTTPException(status_code=400, detail=MSG_REQUIRED) from exc
+        fields = sorted({".".join(str(p) for p in err["loc"]) for err in exc.errors()})
+        raise HTTPException(
+            status_code=422, detail=f"입력값을 확인해 주세요: {', '.join(fields)}"
+        ) from exc
+
+
+async def _read_json(request: Request) -> dict:
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -195,7 +271,33 @@ async def _parse_body(
         ) from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="요청 본문은 객체여야 해요.")
-    return body, None
+    return body
+
+
+async def _parse_generate_body(
+    request: Request, settings: ServingSettings
+) -> tuple[dict, bytes | None]:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith(
+        ("multipart/form-data", "application/x-www-form-urlencoded")
+    ):
+        return await _read_json(request), None
+
+    form = await request.form()
+    body: dict = {}
+    adjustments: list[str] = []
+    reference: bytes | None = None
+    for key, value in form.multi_items():
+        if key == "reference_image":
+            if isinstance(value, UploadFile) and value.filename:
+                reference = await _read_reference(value, settings)
+        elif key == "adjustments" and isinstance(value, str):
+            adjustments.extend(_split_adjustments(value))
+        elif isinstance(value, str):
+            body[key] = value
+    if adjustments:
+        body["adjustments"] = adjustments
+    return body, reference
 
 
 def _split_adjustments(value: str) -> list[str]:
@@ -213,17 +315,15 @@ def _split_adjustments(value: str) -> list[str]:
 async def _read_reference(upload: UploadFile, settings: ServingSettings) -> bytes:
     data = await upload.read(settings.max_upload_bytes + 1)
     if len(data) > settings.max_upload_bytes:
-        limit_mb = settings.max_upload_bytes // (1024 * 1024)
-        raise HTTPException(
-            status_code=422, detail=f"사진은 {limit_mb}MB 이하만 올릴 수 있어요."
-        )
+        raise HTTPException(status_code=413, detail=MSG_TOO_LARGE)
     try:
         image = Image.open(io.BytesIO(data))
+        image_format = image.format
         image.load()
     except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(
-            status_code=422, detail="사진 파일을 읽을 수 없어요."
-        ) from exc
+        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT) from exc
+    if image_format not in ALLOWED_REFERENCE_FORMATS:
+        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT)
 
     # core가 받는 PNG로 통일하고 너무 큰 사진은 줄인다
     image = image.convert("RGBA" if image.mode in ("RGBA", "LA", "P") else "RGB")
@@ -244,8 +344,3 @@ def _check_lengths(payload: GenerateRequest, settings: ServingSettings) -> None:
             status_code=422,
             detail=f"핵심 메시지는 {settings.max_message_chars}자 이하로 입력해 주세요.",
         )
-
-
-def _validation_message(exc: ValidationError) -> str:
-    fields = sorted({".".join(str(p) for p in err["loc"]) for err in exc.errors()})
-    return f"입력값을 확인해 주세요: {', '.join(fields)}"

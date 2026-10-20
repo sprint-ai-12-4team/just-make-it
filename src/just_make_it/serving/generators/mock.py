@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from just_make_it.core.prompt_builder import get_image_size
 
-from ..schemas import GenerationOutput, GenerationSource, GenerationSpec
+from ..schemas import GenerationOutput, GenerationSpec, Source
 from .base import GeneratorError, ImageGenerator
 
 
@@ -30,7 +30,7 @@ class MockGenerator(ImageGenerator):
         self.calls = 0
 
     @property
-    def source(self) -> GenerationSource:
+    def source(self) -> Source:
         return "mock"
 
     def generate(self, spec: GenerationSpec) -> GenerationOutput:
@@ -59,5 +59,10 @@ class MockGenerator(ImageGenerator):
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return GenerationOutput(
-            image_bytes=buffer.getvalue(), message=spec.message, model=self.name
+            image_bytes=buffer.getvalue(),
+            message=spec.message,
+            model=self.name,
+            width=width,
+            height=height,
+            prompt=f"[mock] {spec.product_name} / {spec.message}",
         )

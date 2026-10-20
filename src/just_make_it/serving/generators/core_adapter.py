@@ -6,7 +6,7 @@ core의 함수 이름이나 인자가 바뀌면 이 파일만 고치면 된다.
 
 import logging
 
-from ..schemas import GenerationOutput, GenerationSource, GenerationSpec
+from ..schemas import GenerationOutput, GenerationSpec, Source
 from .base import GeneratorError, ImageGenerator
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class CoreGenerator(ImageGenerator):
         self._load_error: str | None = None
 
     @property
-    def source(self) -> GenerationSource:
+    def source(self) -> Source:
         return "openai" if self._provider == "openai" else "local"
 
     @property
@@ -78,5 +78,10 @@ class CoreGenerator(ImageGenerator):
             raise GeneratorError(f"{type(exc).__name__}: {exc}") from exc
 
         return GenerationOutput(
-            image_bytes=result.image_bytes, message=result.message, model=result.model
+            image_bytes=result.image_bytes,
+            message=result.message,
+            model=result.model,
+            width=result.width,
+            height=result.height,
+            prompt=result.prompt,
         )
