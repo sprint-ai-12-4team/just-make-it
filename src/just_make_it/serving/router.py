@@ -47,6 +47,58 @@ MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
 MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
 
 
+def _json_body_doc(model, example: dict) -> dict:
+    """본문을 직접 읽는 엔드포인트도 Swagger(/docs)에 입력 칸이 보이게 한다.
+
+    필수 문구가 비었을 때 422가 아니라 400을 돌려주려고 본문을 직접 검증하기 때문에,
+    FastAPI가 자동으로 만들지 못하는 requestBody 문서를 여기서 채운다.
+    """
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": model.model_json_schema(),
+                "example": example,
+            }
+        },
+    }
+
+
+COPIES_EXAMPLE = {
+    "product_name": "동네꽃집",
+    "message": "주말 20% 할인",
+    "style": "밝고 경쾌한",
+}
+GENERATE_EXAMPLE = {
+    "purpose": "instagram",
+    "product_name": "소금빵",
+    "message": "신메뉴 출시",
+    "generation_mode": "quick",
+    "style": "따뜻한",
+    "adjustments": [],
+    "parent_id": None,
+}
+
+
+def _generate_body_doc() -> dict:
+    doc = _json_body_doc(GenerateRequest, GENERATE_EXAMPLE)
+    schema = GenerateRequest.model_json_schema()
+    form_properties = dict(schema["properties"])
+    form_properties["reference_image"] = {
+        "type": "string",
+        "format": "binary",
+        "description": "상품 사진 (PNG·JPG·WEBP, 10MB 이하)",
+    }
+    doc["content"]["multipart/form-data"] = {
+        "schema": {
+            "type": "object",
+            "properties": form_properties,
+            "required": schema.get("required", []),
+        }
+    }
+    return doc
+
+
 def _manager(request: Request) -> QueueManager:
     return request.app.state.manager
 
@@ -93,6 +145,7 @@ async def health(request: Request) -> HealthResponse:
     "/copies",
     response_model=CopiesResponse,
     responses={400: {"description": "필수값 누락"}, 503: {"description": "생성 실패"}},
+    openapi_extra={"requestBody": _json_body_doc(CopiesRequest, COPIES_EXAMPLE)},
 )
 async def copies(request: Request) -> CopiesResponse:
     """홍보 문구 후보를 최대 3개 추천한다."""
@@ -128,6 +181,7 @@ async def copies(request: Request) -> CopiesResponse:
         429: {"description": "하루 생성 한도 초과"},
         503: {"description": "생성 실패 또는 요청 과다"},
     },
+    openapi_extra={"requestBody": _generate_body_doc()},
 )
 async def generate(
     request: Request,

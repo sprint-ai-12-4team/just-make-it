@@ -568,3 +568,16 @@ def test_app_starts_without_api_key(tmp_path, monkeypatch):
     assert health.status_code == 200
     assert health.json()["primary_ready"] is False
     assert res.status_code == 503
+
+
+# ---------------------------------------------------------------------- Swagger 문서
+def test_docs_show_request_body_inputs(tmp_path):
+    # 본문을 직접 읽어도 /docs에 입력 칸이 보여야 한다
+    with make_client(tmp_path) as client:
+        spec = client.get("/openapi.json").json()
+    copies = spec["paths"]["/copies"]["post"]["requestBody"]["content"]
+    generate = spec["paths"]["/generate"]["post"]["requestBody"]["content"]
+    assert "application/json" in copies
+    assert {"application/json", "multipart/form-data"} <= set(generate)
+    form = generate["multipart/form-data"]["schema"]["properties"]
+    assert form["reference_image"]["format"] == "binary"
