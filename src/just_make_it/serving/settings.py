@@ -46,6 +46,7 @@ class ServingSettings(BaseSettings):
     # ----- 비용 보호 (Asia/Seoul 자정 기준 초기화, 0이면 무제한) -----
     daily_job_limit: int = 300  # 하루 전체 생성 요청 수
     extra_daily_limit: int = 100  # 그중 Fallback·프리미엄 호출 수
+    client_daily_limit: int = 0  # 사용자(X-Client-Id) 1명당 하루 생성 수 (DB 기준)
 
     # ----- 타임아웃 -----
     # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리
@@ -55,19 +56,19 @@ class ServingSettings(BaseSettings):
     copy_timeout_seconds: float = 30.0
 
     # ----- 응답 -----
-    # /generate가 결과를 기다려 주는 최대 시간(초). 넘으면 202 + id
-    generate_wait_seconds: float = 60.0
-    job_ttl_seconds: int = 60 * 60  # 완료된 작업 기록 보관 시간
+    # /generate는 동기 응답. 대기 + 생성 + Fallback까지 이 시간(초) 안에 안 끝나면 503
+    # (작업 자체는 계속 돌고 결과는 DB에 남아 GET /generations/{id}로 볼 수 있음)
+    generate_wait_seconds: float = 180.0
 
     # ----- 입력 제한 -----
     max_upload_bytes: int = 10 * 1024 * 1024
     max_product_name_chars: int = 50
     max_message_chars: int = 200
 
-    # ----- 결과 저장 -----
-    # 서비스 파트의 GCS 업로더가 붙기 전까지 로컬 디스크에 저장하고 /results 로 서빙
-    result_dir: Path = Path("outputs")
-    public_base_url: str = "http://localhost:8000"
+    # ----- 저장 (service/db.py, service/storage.py) -----
+    # DB(just_make_it.db)·생성 이미지(images/)·참고 사진(references/)을 두는 폴더.
+    # 이미지 URL 앞부분은 서비스 저장소가 PUBLIC_BASE_URL 환경 변수로 정한다
+    data_dir: Path = Path("data")
 
     # ----- CORS -----
     cors_origins: list[str] = ["http://localhost:3000"]

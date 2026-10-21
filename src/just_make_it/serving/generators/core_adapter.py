@@ -11,6 +11,10 @@ from .base import GeneratorError, ImageGenerator
 
 logger = logging.getLogger(__name__)
 
+# 글자는 프론트가 이미지 위에 얹는다 (api_spec 5장, 2026-10-20 결정).
+# core에서 generation_mode가 빠지기 전까지 글자 없는 프롬프트를 쓰는 모드를 고정으로 넘긴다
+TEXT_FREE_MODE = "canvas"
+
 
 class CoreGenerator(ImageGenerator):
     """core registry에 등록된 이미지 모델 하나로 생성한다.
@@ -64,7 +68,7 @@ class CoreGenerator(ImageGenerator):
                 message=spec.message,
                 purpose=spec.purpose,
                 style=spec.style,
-                generation_mode=spec.generation_mode,
+                generation_mode=TEXT_FREE_MODE,
                 backend=self.backend,
                 reference_image=spec.reference_image,
                 adjustments=spec.adjustments,

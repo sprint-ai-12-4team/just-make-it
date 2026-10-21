@@ -16,9 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from .copywriter import CopyWriter, CoreCopyWriter, MockCopyWriter
 from .generators import Generators, build_generators
 from .queue_manager import QueueManager
+from .records import GenerationRecords
 from .router import router
 from .settings import ServingSettings, get_serving_settings
-from .storage import LocalResultStore, ResultStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,15 +29,12 @@ logging.basicConfig(
 def create_app(
     settings: ServingSettings | None = None,
     generators: Generators | None = None,
-    result_store: ResultStore | None = None,
     copywriter: CopyWriter | None = None,
 ) -> FastAPI:
-    """앱을 만든다. 테스트에서는 설정·생성기·저장소·문구 생성기를 갈아 끼울 수 있다."""
+    """앱을 만든다. 테스트에서는 설정·생성기·문구 생성기를 갈아 끼울 수 있다."""
     settings = settings or get_serving_settings()
     primary, fallback, premium = generators or build_generators(settings)
-    store = result_store or LocalResultStore(
-        settings.result_dir, settings.public_base_url
-    )
+    records = GenerationRecords(settings.data_dir)
     if copywriter is None:
         copywriter = (
             MockCopyWriter() if settings.image_backend == "mock" else CoreCopyWriter()
@@ -45,7 +42,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        manager = QueueManager(settings, primary, fallback, premium, store)
+        manager = QueueManager(settings, primary, fallback, premium, records)
         app.state.manager = manager
         await manager.start()
         try:
@@ -67,10 +64,12 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.state.records = records
     app.include_router(router)
 
-    settings.result_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/results", StaticFiles(directory=settings.result_dir), name="results")
+    # 생성 이미지: /images/{id}.png (service/storage.py). CORS는 위 미들웨어가 함께 적용
+    # → 프론트 canvas가 이미지를 읽어 문구를 얹을 수 있다
+    app.mount("/images", StaticFiles(directory=records.image_dir()), name="images")
     return app
 
 

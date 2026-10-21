@@ -20,9 +20,11 @@ Fallback·프리미엄은 하루 extra_daily_limit까지만 쓰고, 넘으면 �
   뒤에서 끝날 때까지 돈다. 호출을 실제로 끊으려면 core의 OpenAI 클라이언트에도
   timeout이 있어야 한다.
 
-로그
-- 작업이 끝날 때마다 `just_make_it.serving.generations` 로거에 JSON 한 줄을 남긴다.
-  필드 이름은 `generations` 테이블 컬럼과 같다.
+기록
+- 접수할 때 `generations` 행(processing)을 만들고, 끝나면 성공·실패로 바꾼다 (service/db.py).
+  행 id가 곧 작업 id이자 응답 id다.
+- 작업이 끝날 때마다 `just_make_it.serving.generations` 로거에도 JSON 한 줄을 남긴다.
+  필드 이름은 `generations` 테이블 컬럼과 같다. DB에 없는 `fallback_reason`을 함께 남긴다.
 """
 
 import asyncio
@@ -30,12 +32,11 @@ import json
 import logging
 import math
 import time
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
 
 from .generators import GeneratorError, ImageGenerator
+from .records import GenerationRecords
 from .schemas import (
     GenerationOutput,
     GenerationSpec,
@@ -44,7 +45,6 @@ from .schemas import (
     Source,
 )
 from .settings import ServingSettings
-from .storage import ResultStore
 
 logger = logging.getLogger(__name__)
 generation_log = logging.getLogger("just_make_it.serving.generations")
@@ -84,7 +84,8 @@ class Job:
     submitted_mono: float = field(default_factory=time.monotonic)
     started_mono: float | None = None
     finished_mono: float | None = None
-    image_url: str | None = None
+    # 성공 시 DB가 돌려준 응답 (api_spec 조회 응답 모양)
+    result: dict | None = None
     source: Source | None = None
     model: str | None = None
     message: str | None = None
@@ -154,13 +155,13 @@ class QueueManager:
         primary: ImageGenerator,
         fallback: ImageGenerator | None,
         premium: ImageGenerator | None,
-        store: ResultStore,
+        records: GenerationRecords,
     ) -> None:
         self.settings = settings
         self.primary = primary
         self.fallback = fallback
         self.premium = premium
-        self.store = store
+        self.records = records
 
         self.concurrency = max(1, settings.primary_concurrency)
         self.seconds_per_job = settings.seconds_per_job_init
@@ -168,9 +169,7 @@ class QueueManager:
         self.extra_today = _DailyCounter(settings.extra_daily_limit)
 
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
-        self._order: deque[str] = deque()  # 대기 순번 계산용
         self._running: set[str] = set()
-        self._jobs: dict[str, Job] = {}
         self._workers: list[asyncio.Task] = []
         self._extra_tasks: set[asyncio.Task] = set()
         self._extra_slots = asyncio.Semaphore(EXTRA_CONCURRENCY)
@@ -214,41 +213,63 @@ class QueueManager:
         client_id: str = "anonymous",
         parent_id: str | None = None,
     ) -> Job:
-        self._cleanup_expired()
         if (
             self._queue.qsize() >= self.settings.queue_max_size
             and self._fallback_reason() is None
         ):
             raise QueueFullError("대기열이 가득 찼습니다.")
+        limit = self.settings.client_daily_limit
+        if (
+            limit
+            and await asyncio.to_thread(self.records.count_today, client_id) >= limit
+        ):
+            raise DailyLimitError("사용자 하루 생성 한도에 도달했습니다.")
         if not self.jobs_today.take():
             raise DailyLimitError("하루 생성 한도에 도달했습니다.")
 
-        def new_job(route: Route, reason: str | None = None) -> Job:
-            job = Job(
-                id=str(uuid.uuid4()),
+        # 다시 만들기에서 사진을 다시 보내지 않으면 원본 결과의 참고 사진을 이어서 쓴다
+        if spec.reference_image is None and parent_id:
+            reference = await asyncio.to_thread(self.records.load_reference, parent_id)
+            if reference is not None:
+                spec = replace(spec, reference_image=reference)
+
+        async def new_job(
+            route: Route, generator: ImageGenerator, reason: str | None = None
+        ) -> Job:
+            gid = await asyncio.to_thread(
+                self.records.start,
+                client_id=client_id,
+                spec=spec,
+                parent_id=parent_id,
+                backend=generator.source,
+                model=generator.name,
+            )
+            if spec.reference_image is not None:
+                await asyncio.to_thread(
+                    self.records.save_reference, gid, spec.reference_image
+                )
+            return Job(
+                id=gid,
                 spec=spec,
                 route=route,
                 client_id=client_id,
                 parent_id=parent_id,
                 fallback_reason=reason,
             )
-            self._jobs[job.id] = job
-            return job
 
         if premium and self._usable(self.premium) and self.extra_today.take():
-            job = new_job("premium")
+            job = await new_job("premium", self.premium)  # type: ignore[arg-type]
             self._spawn_extra(job, self.premium)  # type: ignore[arg-type]
             return job
 
         reason = self._fallback_reason()
         if reason and self.extra_today.take():
-            job = new_job("fallback", reason)
+            job = await new_job("fallback", self.fallback, reason)  # type: ignore[arg-type]
             logger.info("Fallback 라우팅 (%s): job=%s", reason, job.id)
             self._spawn_extra(job, self.fallback)  # type: ignore[arg-type]
             return job
 
-        job = new_job("primary")
-        self._order.append(job.id)
+        job = await new_job("primary", self.primary)
         await self._queue.put(job)
         return job
 
@@ -266,19 +287,6 @@ class QueueManager:
         return generator is not None and generator.is_ready
 
     # ------------------------------------------------------------------ 조회
-    def get(self, job_id: str) -> Job | None:
-        self._cleanup_expired()
-        return self._jobs.get(job_id)
-
-    def queue_position(self, job: Job) -> int | None:
-        """기본 대기열에서 기다리는 중이면 1부터 시작하는 순번, 아니면 None."""
-        if job.state != JobState.QUEUED or job.route != "primary":
-            return None
-        try:
-            return self._order.index(job.id) + 1
-        except ValueError:
-            return None
-
     def _wait_for(self, ahead: int) -> float:
         return round(
             math.ceil((ahead + 1) / self.concurrency) * self.seconds_per_job, 1
@@ -287,12 +295,6 @@ class QueueManager:
     def estimated_wait_for_new_job(self) -> float:
         """지금 접수하는 기본 작업이 끝날 때까지의 예상 시간(초)."""
         return self._wait_for(self._queue.qsize() + len(self._running))
-
-    def estimated_wait(self, job: Job) -> float | None:
-        position = self.queue_position(job)
-        if position is None:
-            return None
-        return self._wait_for(position - 1 + len(self._running))
 
     async def wait(self, job: Job, timeout: float) -> bool:
         """작업 완료를 최대 timeout초 기다린다. 끝났으면 True."""
@@ -325,8 +327,6 @@ class QueueManager:
     async def _worker_loop(self) -> None:
         while True:
             job = await self._queue.get()
-            if job.id in self._order:
-                self._order.remove(job.id)
             self._running.add(job.id)
             job.state = JobState.RUNNING
             job.started_mono = time.monotonic()
@@ -406,20 +406,24 @@ class QueueManager:
     async def _finish(
         self, job: Job, output: GenerationOutput, generator: ImageGenerator
     ) -> None:
+        job.finished_mono = time.monotonic()
+        job.source = generator.source
+        job.model = output.model
+        job.prompt = output.prompt
         try:
-            job.image_url = await asyncio.to_thread(
-                self.store.save, job.id, output.image_bytes
+            job.result = await asyncio.to_thread(
+                self.records.finish,
+                job.id,
+                output,
+                source=generator.source,
+                route=job.route,
+                queue_ms=job.queue_ms,
+                image_ms=job.image_ms,
             )
         except Exception as exc:
             self._fail(job, f"결과 저장 실패: {exc!r}", ERROR_GENERIC)
             return
-        job.source = generator.source
-        job.model = output.model
-        job.message = output.message
-        job.width, job.height = output.width, output.height
-        job.prompt = output.prompt
         job.state = JobState.SUCCEEDED
-        job.finished_mono = time.monotonic()
         job.done.set()
         self._log(job, generator)
 
@@ -436,7 +440,11 @@ class QueueManager:
         job.error_internal = internal_error
         job.input_error = input_error
         job.state = JobState.FAILED
-        job.finished_mono = time.monotonic()
+        job.finished_mono = job.finished_mono or time.monotonic()
+        try:
+            self.records.fail(job.id, internal_error)
+        except Exception:  # 기록 실패가 응답까지 막지 않게
+            logger.exception("실패 기록 저장 실패 job=%s", job.id)
         job.done.set()
         self._log(job, None)
 
@@ -458,13 +466,12 @@ class QueueManager:
             "input_json": {
                 "product_name": job.spec.product_name,
                 "message": job.spec.message,
-                "generation_mode": job.spec.generation_mode,
                 "style": job.spec.style,
                 "adjustments": job.spec.adjustments,
                 "has_reference_image": job.spec.reference_image is not None,
             },
             "image_prompt": job.prompt,
-            "image_path": job.image_url,
+            "image_path": f"{job.id}.png" if job.result else None,
             "backend": backend,
             "route": job.route,
             "fallback_reason": job.fallback_reason,
@@ -482,14 +489,3 @@ class QueueManager:
     def _update_speed(self, seconds: float) -> None:
         # 지수이동평균으로 1건 생성 시간을 보정 (Fallback 기준이 실측을 따라감)
         self.seconds_per_job = 0.7 * self.seconds_per_job + 0.3 * seconds
-
-    def _cleanup_expired(self) -> None:
-        now = time.monotonic()
-        ttl = self.settings.job_ttl_seconds
-        expired = [
-            job_id
-            for job_id, job in self._jobs.items()
-            if job.finished_mono is not None and now - job.finished_mono > ttl
-        ]
-        for job_id in expired:
-            del self._jobs[job_id]

@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
@@ -15,17 +15,15 @@ from .generators import GeneratorError
 from .queue_manager import (
     ERROR_GENERIC,
     DailyLimitError,
-    Job,
     QueueFullError,
     QueueManager,
 )
+from .records import GenerationRecords
 from .schemas import (
     CopiesRequest,
     CopiesResponse,
-    GenerateProcessingResponse,
     GenerateRequest,
     GenerateSuccessResponse,
-    GenerationInput,
     GenerationResponse,
     GenerationSpec,
     HealthResponse,
@@ -73,7 +71,6 @@ GENERATE_EXAMPLE = {
     "purpose": "instagram",
     "product_name": "소금빵",
     "message": "신메뉴 출시",
-    "generation_mode": "quick",
     "style": "따뜻한",
     "adjustments": [],
     "parent_id": None,
@@ -105,6 +102,10 @@ def _manager(request: Request) -> QueueManager:
 
 def _settings(request: Request) -> ServingSettings:
     return request.app.state.settings
+
+
+def _records(request: Request) -> GenerationRecords:
+    return request.app.state.records
 
 
 def _copywriter(request: Request) -> CopyWriter:
@@ -172,9 +173,8 @@ async def copies(request: Request) -> CopiesResponse:
 # ---------------------------------------------------------------------- /generate
 @router.post(
     "/generate",
+    response_model=GenerateSuccessResponse,
     responses={
-        200: {"model": GenerateSuccessResponse, "description": "생성 완료"},
-        202: {"model": GenerateProcessingResponse, "description": "아직 생성 중"},
         400: {"description": "필수값 누락"},
         413: {"description": "사진 10MB 초과"},
         415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
@@ -186,17 +186,13 @@ async def copies(request: Request) -> CopiesResponse:
 async def generate(
     request: Request,
     x_client_id: str | None = Header(default=None),
-    wait: float | None = Query(
-        default=None,
-        ge=0,
-        description="결과를 기다려 줄 최대 시간(초). 0이면 바로 202 + id",
-    ),
-):
-    """광고 이미지를 생성한다 (다시 만들기·수정 포함).
+) -> GenerateSuccessResponse:
+    """광고 이미지를 생성한다 (다시 만들기·수정 포함). **동기 응답**.
 
     - `application/json`, 참고 사진이 있으면 `multipart/form-data`(`reference_image`)
-    - 기본은 동기 응답. 대기열이 길어 `wait`초 안에 끝나지 않으면 202 + `id`를 주고,
-      프론트는 `GET /generations/{id}`로 확인한다.
+    - 이미지는 글자 없이 만들고, 응답 `message`를 프론트가 이미지 위에 얹는다
+    - 기본 모델이 밀리면 서버가 Fallback 모델로 넘기므로 프론트는 폴링하지 않는다
+    - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
     """
     settings = _settings(request)
     body, reference = await _parse_generate_body(request, settings)
@@ -208,7 +204,6 @@ async def generate(
         message=payload.message,
         purpose=payload.purpose,
         style=payload.style,
-        generation_mode=payload.generation_mode,
         adjustments=payload.adjustments,
         reference_image=reference,
     )
@@ -226,78 +221,30 @@ async def generate(
     except DailyLimitError as exc:
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
 
-    timeout = settings.generate_wait_seconds if wait is None else wait
-    await manager.wait(job, min(timeout, settings.generate_wait_seconds))
-
-    if job.state == JobState.SUCCEEDED:
-        return _success(job)
+    if not await manager.wait(job, settings.generate_wait_seconds):
+        # 작업은 뒤에서 계속 돌고 결과는 DB에 남는다 (GET /generations/{id})
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC)
     if job.state == JobState.FAILED:
         status_code = 400 if job.input_error else 503
         return JSONResponse(status_code=status_code, content={"detail": job.error})
-    processing = GenerateProcessingResponse(
-        id=job.id,
-        queue_position=manager.queue_position(job),
-        estimated_wait_seconds=manager.estimated_wait(job),
-    )
-    return JSONResponse(status_code=202, content=processing.model_dump())
+    return GenerateSuccessResponse.model_validate(job.result)
 
 
 # ---------------------------------------------------------------------- /generations
-@router.get("/generations/{generation_id}", response_model=GenerationResponse)
+@router.get(
+    "/generations/{generation_id}",
+    response_model=GenerationResponse,
+    responses={404: {"description": "없는 결과 id"}},
+)
 async def get_generation(request: Request, generation_id: str) -> GenerationResponse:
-    """생성 결과를 다시 조회한다. 폴링 간격은 1~2초를 권장한다.
-
-    DB가 붙기 전까지는 완료 후 1시간 동안만 메모리에 보관한다.
-    """
-    manager = _manager(request)
-    job = manager.get(generation_id)
-    if job is None:
+    """생성 결과를 다시 조회한다 (결과 화면 새로고침, 링크 공유). DB에 영구 보관."""
+    record = await asyncio.to_thread(_records(request).get, generation_id)
+    if record is None:
         raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
-
-    spec = job.spec
-    response = GenerationResponse(
-        id=job.id,
-        status="processing",
-        route=job.route,
-        parent_id=job.parent_id,
-        created_at=job.created_at,
-        input=GenerationInput(
-            purpose=spec.purpose,
-            product_name=spec.product_name,
-            message=spec.message,
-            generation_mode=spec.generation_mode,
-            style=spec.style,
-            adjustments=spec.adjustments,
-        ),
-    )
-    if job.state == JobState.SUCCEEDED:
-        response.status = "success"
-        response.image_url = job.image_url
-        response.message = job.message
-        response.source = job.source
-        response.width, response.height = job.width, job.height
-    elif job.state == JobState.FAILED:
-        response.status = "error"
-        response.error = job.error
-    else:
-        response.queue_position = manager.queue_position(job)
-        response.estimated_wait_seconds = manager.estimated_wait(job)
-    return response
+    return GenerationResponse.model_validate(record)
 
 
 # ---------------------------------------------------------------------- 보조 함수
-def _success(job: Job) -> GenerateSuccessResponse:
-    return GenerateSuccessResponse(
-        id=job.id,
-        image_url=job.image_url or "",
-        message=job.message or job.spec.message,
-        source=job.source or "local",
-        width=job.width or 0,
-        height=job.height or 0,
-        route=job.route,
-    )
-
-
 def _validate(model, body: dict):
     """필수 문구가 비었으면 400, 그 밖의 타입·허용값 오류는 422 (스펙 4장)."""
     try:

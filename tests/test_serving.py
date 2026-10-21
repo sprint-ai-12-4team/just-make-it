@@ -8,7 +8,10 @@ import io
 import json
 import logging
 import os
+import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +35,6 @@ BASE_BODY = {
     "product_name": "동네빵집",
     "message": "신메뉴 소금빵 출시",
     "style": "따뜻한",
-    "generation_mode": "quick",
 }
 
 
@@ -126,8 +128,7 @@ def make_client(
 ):
     settings = ServingSettings(
         _env_file=None,
-        result_dir=tmp_path,
-        public_base_url="http://testserver",
+        data_dir=tmp_path,
         generate_wait_seconds=5.0,
         **overrides,
     )
@@ -140,18 +141,32 @@ def make_client(
     return TestClient(app)
 
 
-def poll(client, generation_id, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        body = client.get(f"/generations/{generation_id}").json()
-        if body["status"] != "processing":
-            return body
-        time.sleep(0.05)
-    raise AssertionError("작업이 제한 시간 안에 끝나지 않았습니다.")
+def db_rows(tmp_path, sql="SELECT * FROM generations ORDER BY rowid") -> list[dict]:
+    """서빙이 남긴 generations 행 (service/db.py의 SQLite 파일)."""
+    conn = sqlite3.connect(tmp_path / "just_make_it.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute(sql)]
+    finally:
+        conn.close()
 
 
-def fetch_image(client, url) -> Image.Image:
-    res = client.get(url.replace("http://testserver", ""))
+def route_of(tmp_path, generation_id) -> str:
+    return next(r["route"] for r in db_rows(tmp_path) if r["id"] == generation_id)
+
+
+def post_parallel(client, n, body=BASE_BODY) -> list:
+    """동기 응답이라 동시에 보내려면 스레드를 쓴다."""
+    with ThreadPoolExecutor(n) as pool:
+        futures = []
+        for _ in range(n):
+            futures.append(pool.submit(client.post, "/generate", json=body))
+            time.sleep(0.05)  # 접수 순서를 고정
+        return [f.result() for f in futures]
+
+
+def fetch_image(client, url):
+    res = client.get(urlparse(url).path)
     assert res.status_code == 200
     return Image.open(io.BytesIO(res.content))
 
@@ -196,22 +211,75 @@ def test_frontend_payload_with_extra_fields_is_accepted(tmp_path):
     assert res.status_code == 200
 
 
-def test_processing_then_get_generation(tmp_path):
-    with make_client(tmp_path, primary=MockGenerator(0.3)) as client:
-        res = client.post(
-            "/generate?wait=0",
-            json={**BASE_BODY, "parent_id": "p-1"},
+def test_get_generation_returns_saved_result(tmp_path):
+    with make_client(tmp_path) as client:
+        first = client.post("/generate", json=BASE_BODY).json()
+        second = client.post(
+            "/generate",
+            json={**BASE_BODY, "parent_id": first["id"], "adjustments": ["더 밝게"]},
             headers={"X-Client-Id": "client-123"},
+        ).json()
+        res = client.get(f"/generations/{second['id']}")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["parent_id"] == first["id"]
+    assert body["image_url"] == second["image_url"]
+    assert body["input"]["product_name"] == "동네빵집"
+    assert body["input"]["adjustments"] == ["더 밝게"]
+    assert body["created_at"].endswith("Z")
+    assert body["width"] == 1024
+    row = db_rows(tmp_path)[-1]
+    assert row["client_id"] == "client-123"
+    assert row["route"] == "primary" and row["backend"] == "mock"
+    assert row["queue_ms"] is not None and row["image_ms"] is not None
+
+
+def test_results_survive_restart(tmp_path):
+    with make_client(tmp_path) as client:
+        body = client.post("/generate", json=BASE_BODY).json()
+    with make_client(tmp_path) as client:  # 서버 재시작
+        again = client.get(f"/generations/{body['id']}").json()
+        image = fetch_image(client, again["image_url"])
+    assert again["status"] == "success"
+    assert image.size == (1024, 1024)
+
+
+def test_unknown_parent_id_is_ignored(tmp_path):
+    with make_client(tmp_path) as client:
+        res = client.post("/generate", json={**BASE_BODY, "parent_id": "no-such-id"})
+    assert res.status_code == 200
+    assert db_rows(tmp_path)[0]["parent_id"] is None
+
+
+def test_regenerate_reuses_parent_reference_photo(tmp_path):
+    primary = RecordingMock(0.01)
+    with make_client(tmp_path, primary=primary) as client:
+        first = client.post(
+            "/generate",
+            data=BASE_BODY,
+            files={"reference_image": ("p.png", png_bytes(), "image/png")},
+        ).json()
+        # 다시 만들기: 프론트는 사진을 다시 보내지 않는다
+        client.post("/generate", json={**BASE_BODY, "parent_id": first["id"]})
+        client.post("/generate", json=BASE_BODY)  # 새 생성은 사진 없음
+    assert primary.specs[1].reference_image == primary.specs[0].reference_image
+    assert primary.specs[2].reference_image is None
+    # 참고 사진은 공개 URL(/images)이 아닌 references/에 둔다
+    assert (tmp_path / "references" / first["id"]).exists()
+    assert not list((tmp_path / "images").glob("*ref*"))
+
+
+def test_image_is_readable_from_frontend_origin(tmp_path):
+    # 프론트 canvas가 이미지를 읽으려면 CORS 헤더가 있어야 한다 (api_spec 5장)
+    with make_client(tmp_path) as client:
+        body = client.post("/generate", json=BASE_BODY).json()
+        res = client.get(
+            urlparse(body["image_url"]).path,
+            headers={"Origin": "http://localhost:3000"},
         )
-        assert res.status_code == 202
-        body = res.json()
-        assert body["status"] == "processing"
-        final = poll(client, body["id"])
-    assert final["status"] == "success"
-    assert final["parent_id"] == "p-1"
-    assert final["input"]["product_name"] == "동네빵집"
-    assert final["created_at"].endswith("Z")
-    assert final["width"] == 1024
+    assert res.status_code == 200
+    assert res.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
 def test_get_unknown_generation_returns_404(tmp_path):
@@ -264,7 +332,7 @@ def test_missing_required_text_returns_400(tmp_path, body):
     "body",
     [
         {**BASE_BODY, "purpose": "tiktok"},
-        {**BASE_BODY, "generation_mode": "auto"},
+        {**BASE_BODY, "adjustments": "더 밝게"},
         {**BASE_BODY, "message": "가" * 201},
     ],
 )
@@ -307,14 +375,15 @@ def test_generation_failure_returns_503_with_detail(tmp_path):
     assert res.json() == {"detail": "잠시 후 다시 시도해 주세요."}
 
 
-def test_failed_generation_status_is_error(tmp_path):
+def test_failed_generation_is_recorded_as_error(tmp_path):
     with make_client(
-        tmp_path, primary=MockGenerator(0.3, fail_times=99), retry_count=0
+        tmp_path, primary=MockGenerator(0.01, fail_times=99), retry_count=0
     ) as client:
-        generation_id = client.post("/generate?wait=0", json=BASE_BODY).json()["id"]
-        final = poll(client, generation_id)
-    assert final["status"] == "error"
-    assert final["error"]
+        client.post("/generate", json=BASE_BODY)
+        row = db_rows(tmp_path)[0]
+        res = client.get(f"/generations/{row['id']}")
+    assert row["status"] == "error" and row["error"]
+    assert res.json()["status"] == "error"
 
 
 def test_input_error_returns_400_without_retry_or_fallback(tmp_path):
@@ -333,6 +402,14 @@ def test_daily_job_limit_returns_429(tmp_path):
         res = client.post("/generate", json=BASE_BODY)
     assert res.status_code == 429
     assert res.json() == {"detail": "오늘 만들 수 있는 횟수를 다 썼어요."}
+
+
+def test_client_daily_limit_is_per_user(tmp_path):
+    with make_client(tmp_path, client_daily_limit=1) as client:
+        a1 = client.post("/generate", json=BASE_BODY, headers={"X-Client-Id": "a"})
+        a2 = client.post("/generate", json=BASE_BODY, headers={"X-Client-Id": "a"})
+        b1 = client.post("/generate", json=BASE_BODY, headers={"X-Client-Id": "b"})
+    assert (a1.status_code, a2.status_code, b1.status_code) == (200, 429, 200)
 
 
 # ---------------------------------------------------------------------- 타임아웃
@@ -358,7 +435,8 @@ def test_timeout_falls_back(tmp_path):
     ) as client:
         body = client.post("/generate", json=BASE_BODY).json()
     assert body["status"] == "success"
-    assert body["route"] == "fallback"
+    assert route_of(tmp_path, body["id"]) == "fallback"
+    assert body["source"] == "mock"
 
 
 # ---------------------------------------------------------------------- 재시도·Fallback
@@ -367,7 +445,7 @@ def test_retry_then_success_on_primary(tmp_path):
     with make_client(tmp_path, primary=primary, retry_count=1) as client:
         body = client.post("/generate", json=BASE_BODY).json()
     assert body["status"] == "success"
-    assert body["route"] == "primary"
+    assert route_of(tmp_path, body["id"]) == "primary"
     assert primary.calls == 2
 
 
@@ -379,10 +457,10 @@ def test_queue_wait_triggers_fallback(tmp_path):
         seconds_per_job_init=10.0,
         max_wait_seconds=15.0,
     ) as client:
-        first = client.post("/generate?wait=0", json=BASE_BODY).json()
-        second = client.post("/generate?wait=0", json=BASE_BODY).json()
-        assert poll(client, first["id"])["route"] == "primary"
-        assert poll(client, second["id"])["route"] == "fallback"
+        first, second = (r.json() for r in post_parallel(client, 2))
+    assert route_of(tmp_path, first["id"]) == "primary"
+    assert route_of(tmp_path, second["id"]) == "fallback"
+    # DB에는 Fallback 이유 대신 경로만 남고, 이유는 생성 로그에 남는다
 
 
 def test_primary_failure_falls_back_after_retry(tmp_path):
@@ -394,7 +472,7 @@ def test_primary_failure_falls_back_after_retry(tmp_path):
         retry_count=1,
     ) as client:
         body = client.post("/generate", json=BASE_BODY).json()
-    assert body["route"] == "fallback"
+    assert route_of(tmp_path, body["id"]) == "fallback"
     assert primary.calls == 2
 
 
@@ -409,7 +487,7 @@ def test_extra_daily_limit_stops_fallback(tmp_path):
         first = client.post("/generate", json=BASE_BODY)
         second = client.post("/generate", json=BASE_BODY)
         health = client.get("/health").json()
-    assert first.json()["route"] == "fallback"
+    assert route_of(tmp_path, first.json()["id"]) == "fallback"
     assert second.status_code == 503
     assert health["extra_calls_today"] == 1
 
@@ -418,14 +496,14 @@ def test_premium_route(tmp_path):
     premium = RecordingMock(0.01, name="premium")
     with make_client(tmp_path, premium=premium) as client:
         body = client.post("/generate", json={**BASE_BODY, "premium": True}).json()
-    assert body["route"] == "premium"
+    assert route_of(tmp_path, body["id"]) == "premium"
     assert len(premium.specs) == 1
 
 
 def test_premium_without_premium_model_uses_primary(tmp_path):
     with make_client(tmp_path) as client:
         body = client.post("/generate", json={**BASE_BODY, "premium": True}).json()
-    assert body["route"] == "primary"
+    assert route_of(tmp_path, body["id"]) == "primary"
 
 
 def test_primary_concurrency_runs_jobs_in_parallel(tmp_path):
@@ -433,14 +511,10 @@ def test_primary_concurrency_runs_jobs_in_parallel(tmp_path):
         tmp_path, primary=MockGenerator(0.5), primary_concurrency=2
     ) as client:
         started = time.monotonic()
-        ids = [
-            client.post("/generate?wait=0", json=BASE_BODY).json()["id"]
-            for _ in range(2)
-        ]
-        for generation_id in ids:
-            poll(client, generation_id)
+        results = post_parallel(client, 2)
         elapsed = time.monotonic() - started
-    assert elapsed < 0.9  # 순서대로였다면 1초 이상
+    assert all(r.status_code == 200 for r in results)
+    assert elapsed < 0.95  # 순서대로였다면 1초 이상
 
 
 # ---------------------------------------------------------------------- 생성 로그
@@ -533,6 +607,8 @@ def test_core_generator_end_to_end(tmp_path, fake_core):
     call = fake_core.calls[0]
     assert call["ref"] is not None
     assert "brighter" in call["prompt"]  # core가 수정 칩을 프롬프트에 반영
+    # 글자는 프론트가 얹으므로 이미지 프롬프트에 문구를 그리라는 지시가 없어야 한다
+    assert "Include this Korean headline" not in call["prompt"]
     assert image.size == (1536, 864)
 
 
@@ -553,14 +629,14 @@ def test_unknown_core_model_is_not_ready_and_falls_back(tmp_path):
         health = client.get("/health").json()
         body = client.post("/generate", json=BASE_BODY).json()
     assert health["status"] == "degraded"
-    assert body["route"] == "fallback"
+    assert route_of(tmp_path, body["id"]) == "fallback"
 
 
 def test_app_starts_without_api_key(tmp_path, monkeypatch):
     # 배포 환경에서 키가 빠져도 서버는 떠야 한다 (헬스체크로 원인 확인)
     monkeypatch.setattr(config, "OPENAI_API_KEY", "")
     registry.clear_loaded_models()
-    settings = ServingSettings(_env_file=None, result_dir=tmp_path)
+    settings = ServingSettings(_env_file=None, data_dir=tmp_path)
     with TestClient(create_app(settings=settings)) as client:
         health = client.get("/health")
         res = client.post("/generate", json=BASE_BODY)

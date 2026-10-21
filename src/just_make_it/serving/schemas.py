@@ -10,7 +10,6 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 Purpose = Literal["instagram", "commerce", "youtube", "kakao", "free"]
-GenerationMode = Literal["quick", "template", "canvas"]
 # 실제로 이미지를 만든 곳: openai(OpenAI API), local(VM 모델), mock(개발용). 통계용
 Source = Literal["local", "openai", "mock"]
 # 서버가 고른 경로: primary(기본), fallback(대기·장애 우회), premium(유저 선택). 통계용
@@ -25,12 +24,15 @@ def _strip_text(value: object) -> object:
 
 
 class GenerateRequest(BaseModel):
-    """POST /generate 요청 본문 (JSON 또는 multipart 폼 필드)."""
+    """POST /generate 요청 본문 (JSON 또는 multipart 폼 필드).
+
+    `generation_mode`는 스펙에서 삭제됐다 (글자는 항상 프론트가 얹음).
+    예전 프론트가 보내더라도 모르는 필드는 무시한다.
+    """
 
     purpose: Purpose
     product_name: str
     message: str
-    generation_mode: GenerationMode = "quick"
     style: str | None = None
     # 결과 화면의 "조금 수정하기" 칩 (예: ["더 밝게", "텍스트 짧게"])
     adjustments: list[str] = Field(default_factory=list, max_length=10)
@@ -82,34 +84,23 @@ class GenerateSuccessResponse(BaseModel):
     id: str
     status: Literal["success"] = "success"
     image_url: str
-    # 이미지에 실제로 쓴 문구 ("텍스트 짧게"를 누르면 줄어든 문구)
+    # 실제로 쓴 문구 ("텍스트 짧게"를 누르면 줄어든 문구). 프론트가 이미지 위에 얹는다
     message: str
     source: Source
     width: int
     height: int
-    route: Route
-
-
-class GenerateProcessingResponse(BaseModel):
-    """아직 생성 중 (POST /generate 202)."""
-
-    id: str
-    status: Literal["processing"] = "processing"
-    queue_position: int | None = None
-    estimated_wait_seconds: float | None = None
 
 
 class GenerationInput(BaseModel):
     purpose: str
     product_name: str
     message: str
-    generation_mode: str
-    style: str | None
-    adjustments: list[str]
+    style: str | None = None
+    adjustments: list[str] = Field(default_factory=list)
 
 
 class GenerationResponse(BaseModel):
-    """결과 조회 (GET /generations/{id}). status에 따라 채워지는 필드가 다르다."""
+    """결과 조회 (GET /generations/{id}). DB(service/db.py)가 돌려주는 모양 그대로."""
 
     id: str
     status: Literal["processing", "success", "error"]
@@ -118,11 +109,7 @@ class GenerationResponse(BaseModel):
     source: Source | None = None
     width: int | None = None
     height: int | None = None
-    route: Route
-    queue_position: int | None = None
-    estimated_wait_seconds: float | None = None
-    error: str | None = None
-    parent_id: str | None
+    parent_id: str | None = None
     created_at: str
     input: GenerationInput
 
@@ -152,7 +139,6 @@ class GenerationSpec:
     message: str
     purpose: str = "free"
     style: str | None = None
-    generation_mode: str = "quick"
     adjustments: list[str] = field(default_factory=list)
     reference_image: bytes | None = None
 
