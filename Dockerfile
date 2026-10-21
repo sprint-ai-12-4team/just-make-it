@@ -56,7 +56,8 @@ ENV HF_HOME=/app/model-cache
 ENV TRANSFORMERS_CACHE=/app/model-cache
 
 # non-root 유저로 실행
-RUN mkdir -p /app/model-cache && chown -R appuser:appuser /app
+# data: 서비스 DB·생성 이미지 (compose의 service-data 볼륨이 이 소유권을 이어받음)
+RUN mkdir -p /app/model-cache /app/data && chown -R appuser:appuser /app
 USER appuser
 
 # 포트
