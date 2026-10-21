@@ -2,7 +2,7 @@
 
 import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
-import { STYLES, type Purpose } from "@/lib/types";
+import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
 import { ChevronLeft, ImagePlus, Sparkles, X } from "lucide-react";
 import Link from "next/link";
@@ -17,6 +17,8 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
   const [style, setStyle] = useState<string | null>(null);
+  const [imageModel, setImageModel] = useState<ImageModel>(IMAGE_MODELS[0].id);
+  const [textModel, setTextModel] = useState<TextModel>(TEXT_MODELS[0].id);
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [photoError, setPhotoError] = useState("");
@@ -48,7 +50,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
     setCopyBusy(true);
     setError("");
     try {
-      setCopies(await api.suggestCopies({ product_name: name.trim(), message: message.trim(), style }));
+      setCopies(await api.suggestCopies({ product_name: name.trim(), message: message.trim(), style, text_model: textModel }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -64,13 +66,13 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
     try {
       if (detail) {
         const id = await api.startDetailPage(
-          { product_name: name.trim(), message: message.trim(), features: features.map((f) => f.trim()).filter(Boolean), style },
+          { product_name: name.trim(), message: message.trim(), features: features.map((f) => f.trim()).filter(Boolean), style, image_model: imageModel },
           photo,
         );
         router.push(`/detail/${id}`);
       } else {
         const g = await api.generate(
-          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null },
+          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel },
           photo,
         );
         router.push(`/result/${g.id}`);
@@ -198,6 +200,28 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
         )}
         {photoError && <FieldError>{photoError}</FieldError>}
       </div>
+
+      <details className="rounded-card border-2 border-mist p-5">
+        <summary className="cursor-pointer font-semibold">품질 고르기 (선택)</summary>
+        <div className="mt-5 flex flex-col gap-6">
+          {[
+            { legend: "그림", list: IMAGE_MODELS, value: imageModel as string, set: (v: string) => setImageModel(v as ImageModel) },
+            { legend: "문구 추천", list: TEXT_MODELS, value: textModel as string, set: (v: string) => setTextModel(v as TextModel) },
+          ].map((g) => (
+            <fieldset key={g.legend}>
+              <legend className="label">{g.legend}</legend>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {g.list.map((m) => (
+                  <button key={m.id} type="button" aria-pressed={g.value === m.id} onClick={() => g.set(m.id)} className={clsx("rounded-card border-2 p-4 text-left", g.value === m.id ? "border-ink bg-pollen" : "border-mist bg-white")}>
+                    <span className="block font-semibold">{m.title}</span>
+                    <span className="hint">{m.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+        </div>
+      </details>
 
       {error && <Notice>{error}</Notice>}
 

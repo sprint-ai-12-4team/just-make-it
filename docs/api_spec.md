@@ -15,6 +15,7 @@
 | 사용자 구분 | 헤더 `X-Client-Id: <uuid>` — 브라우저가 처음 접속할 때 만들어 `localStorage`에 저장. 로그인 없음 (MVP) |
 | 에러 | FastAPI 기본 형식 `{"detail": "사용자에게 보여줄 한글 메시지"}` |
 | 생성 경로 | 로컬 GPU / OpenAI 중 어디서 만들었는지는 `source`로만 알려줌. **화면에는 노출하지 않음** |
+| 모델 이름 | `image_model`·`text_model` 값은 화면에 노출하지 않음. 프론트는 "빠르게 / 더 정교하게" 같은 이름으로만 보여줌 |
 | 동기 / 비동기 | 단일 이미지(`/generate`)는 **동기**. 상세페이지(`/detail-pages`)는 **비동기** (`202` 응답 → 폴링) |
 
 ---
@@ -50,6 +51,7 @@
 | `product_name` | string | ✅ | 가게·상품 이름 |
 | `message` | string | ✅ | 핵심 메시지 (예: `주말 20% 할인`) |
 | `style` | string | | 분위기 칩 값 ([5. 공통 값](#5-공통-값)) |
+| `text_model` | string | | `gemma-4-12b-it`(기본) · `openai-gpt-5.6-luna` |
 
 ```json
 {"product_name": "동네꽃집", "message": "주말 20% 할인", "style": "밝고 경쾌한"}
@@ -76,6 +78,7 @@
 | `style` | string | | `null` | 분위기 칩 값 |
 | `adjustments` | string[] | | `[]` | "조금 수정하기" 칩 값 |
 | `parent_id` | string | | `null` | 다시 만들기·수정할 때 원본 결과의 `id` |
+| `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
 
 - **다시 만들기**: 같은 입력 + `parent_id`
@@ -153,6 +156,7 @@
 | `message` | string | ✅ | 핵심 메시지 |
 | `features` | string[] | | 상품 특징 (최대 3개). 비우면 텍스트 모델이 만듦 |
 | `style` | string | | 분위기 칩 값 |
+| `image_model` | string | | `/generate`와 같음. 섹션 재생성도 이 값을 그대로 씀 |
 | `reference_image` | file | | 상품 사진 (multipart만). 조건은 `/generate`와 같음 |
 
 ```json
@@ -273,7 +277,7 @@
 - [ ] 상세페이지 섹션 수(5)·섹션 이미지 크기 확정 — PM·모델
 - [ ] 상세페이지 작업 실행 방식 (FastAPI `BackgroundTasks` vs 별도 대기열), 서버 재시작 시 진행 중이던 작업 처리 — 서빙
 - [x] 상세페이지 저장 구조 → `detail_pages` 테이블 + 섹션 이미지는 `generations` 행 (`detail_page_id`, `section_index`). `docs/schema.sql` 참고 (코드가 읽는 위치는 `service/schema.sql`로 이동 예정)
-- [ ] 이미지 모델 선택 필드(`model`)와 `GET /models` — `pipeline_options.md` 결정 후 `/generate`·섹션 재생성에 함께 추가
+- [x] 모델 선택 → `image_model`(`/generate`·`/detail-pages`), `text_model`(`/copies`). 프론트는 고정 목록 사용, `GET /models`는 상주 모델이 바뀔 때 추가 — 서빙
 - [x] 저장소 → **VM 로컬 디스크** (DB: SQLite, 이미지: `$DATA_DIR/images`, `/images/{id}.png`로 제공, 만료 없음). 코드 `service/db.py`, `service/storage.py`
 - [ ] 일일 생성 한도 값, 비로그인 허용 여부 — PM
 - [ ] 참고 사진 최대 크기 10MB 확정 — 서빙·모델

@@ -1,7 +1,8 @@
 import { mock } from "./mock";
-import type { DetailInput, DetailPage, GenerateInput, Generation } from "./types";
+import type { DetailInput, DetailPage, GenerateInput, Generation, TextModel } from "./types";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// next.config.ts의 rewrites로 NEXT_PUBLIC_API_URL에 프록시. https(Vercel) → http(VM) 혼합 콘텐츠·CORS 회피
+const BASE = "/api/backend";
 const USE_MOCK = process.env.NEXT_PUBLIC_MOCK === "1";
 
 export class ApiError extends Error {
@@ -51,7 +52,7 @@ async function call<T>(path: string, init: { method?: string; body?: BodyInit } 
 }
 
 const real = {
-  suggestCopies: (b: { product_name: string; message: string; style: string | null }) =>
+  suggestCopies: (b: { product_name: string; message: string; style: string | null; text_model: TextModel }) =>
     call<{ copies: string[] }>("/copies", { method: "POST", body: toBody(b) }).then((r) => r.copies),
   generate: (b: GenerateInput, file?: File | null) =>
     call<Generation>("/generate", { method: "POST", body: toBody(b, file) }),
