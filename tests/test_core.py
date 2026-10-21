@@ -1,238 +1,454 @@
-"""모델 파트(core) 테스트. 가짜 모델을 쓰기 때문에 API 비용이 들지 않슴당.
+"""파이프라인 V1 테스트. 실제 모델 대신 가짜 모델을 끼워서 API 비용과 GPU 없이 확인합니다."""
 
-실행: python -m pytest tests/test_core.py
-"""
+import io
+import re
 
 import pytest
+from PIL import Image
 
-from just_make_it.core import pipeline, registry
+from just_make_it import config
+from just_make_it.core import ai_models
 from just_make_it.core.base import (
-    BaseImageModel,
-    BaseTextModel,
     ImageGenerationError,
     ImageResult,
+    TextGenerationError,
     TextResult,
 )
-from just_make_it.core.copywriter import parse_copies, suggest_ad_copies
-from just_make_it.core.image_models.openai_image import OpenAIImageModel, _guess_mime
-from just_make_it.core.prompt_builder import build_image_prompt, get_image_size
-from just_make_it.core.registry import list_image_models
+from just_make_it.core.copywriter import (
+    describe_for_image,
+    parse_copies,
+    shorten_message,
+    suggest_ad_copies,
+)
+from just_make_it.core.pipeline import generate_ad_image
+from just_make_it.core.prompt_builder import (
+    PURPOSE_SIZES,
+    build_image_prompt,
+    get_image_size,
+)
+from just_make_it.core.text_overlay import DESIGNS, render_text
 
 
-class FakeImageModel(BaseImageModel):
-    """테스트용 가짜 모델. 새 모델을 추가하는 방법의 예시."""
-
-    name = "fake"
-
-    def __init__(self):
-        self.last_call = None
-
-    def generate(self, prompt, width, height, **options):
-        self.last_call = {"prompt": prompt, "width": width, "height": height, **options}
-        return ImageResult(image_bytes=b"fake-png", model="fake-model", elapsed_sec=0.1)
+def png_bytes(width=256, height=256, color="skyblue", fmt="PNG"):
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, format=fmt)
+    return buffer.getvalue()
 
 
-@pytest.fixture
-def fake_model(monkeypatch):
-    """registry에 가짜 모델을 등록하고 캐시를 비웁니다."""
-    monkeypatch.setitem(registry.IMAGE_MODELS, "fake", FakeImageModel)
-    registry.clear_loaded_models()
-    yield
-    registry.clear_loaded_models()
+class FakeText:
+    """지시문을 보고 그럴듯한 답을 돌려주는 가짜 텍스트 모델."""
 
+    def __init__(self, name, fail=False, cost=0.0):
+        self.name = name
+        self.fail = fail
+        self.cost = cost
+        self.calls = []
 
-def test_size_by_purpose():
-    assert get_image_size("youtube") == (1536, 864)
-    assert get_image_size("없는목적") == (1024, 1024)
-
-
-def test_prompt_quick_mode_includes_korean_text():
-    prompt = build_image_prompt(
-        "소금빵", "신메뉴 출시", style="따뜻한", include_text=True
-    )
-    assert '"신메뉴 출시"' in prompt
-    assert "warm" in prompt
-
-
-def test_prompt_requires_inputs():
-    with pytest.raises(ValueError):
-        build_image_prompt("  ", "신메뉴 출시")
-
-
-def test_openai_size_is_multiple_of_16():
-    assert OpenAIImageModel._size_for(1536, 864) == "1536x864"
-    assert OpenAIImageModel._size_for(1080, 1920) == "1072x1920"
-
-
-def test_new_model_plugs_in_without_changing_generator(fake_model):
-    result = pipeline.generate_ad_image(
-        "소금빵",
-        "신메뉴 출시",
-        purpose="kakao",
-        generation_mode="template",
-        backend="fake",
-    )
-    model = registry.get_image_model("fake")
-
-    assert result.image_bytes == b"fake-png"
-    assert result.backend == "fake"
-    assert (result.width, result.height) == (1024, 1536)
-    assert "Do not include any text" in model.last_call["prompt"]
-
-
-def test_model_is_loaded_only_once(fake_model, monkeypatch):
-    assert registry.get_image_model("fake") is registry.get_image_model("fake")
-    # 이름을 비웠을 때와 기본 모델 이름을 넣었을 때도 같은 모델이어야 함
-    monkeypatch.setattr(registry, "DEFAULT_IMAGE_BACKEND", "fake")
-    assert registry.get_image_model() is registry.get_image_model("fake")
-
-
-def test_unknown_backend():
-    with pytest.raises(ValueError):
-        pipeline.generate_ad_image("소금빵", "신메뉴 출시", backend="없는모델")
-
-
-def test_default_model_is_gpt_image_2_5_flare(monkeypatch):
-    monkeypatch.setattr(OpenAIImageModel, "__init__", _fake_openai_init)
-    registry.clear_loaded_models()
-
-    names = [m["name"] for m in list_image_models()]
-    assert names == ["gpt-image-2.5-flare"]
-    assert registry.get_image_model().model == "gpt-image-2.5-flare"
-    registry.clear_loaded_models()
-
-
-def _fake_openai_init(self, model=None, quality=None):
-    """키 없이 모델 이름만 확인하려고 쓰는 가짜 초기화."""
-    self.model = model
-    self.quality = quality
-
-
-# ---------- 참고 사진 ----------
-
-
-def test_prompt_with_reference_keeps_product():
-    prompt = build_image_prompt("청담 카페라떼", "오픈 이벤트", has_reference=True)
-    assert "reference image" in prompt
-    assert "exactly as they are" in prompt
-
-
-def test_reference_image_is_passed_to_model(fake_model):
-    photo = b"\x89PNG fake photo"
-    pipeline.generate_ad_image(
-        "청담 카페라떼", "오픈 이벤트", backend="fake", reference_image=photo
-    )
-    assert registry.get_image_model("fake").last_call["reference_image"] == photo
-
-
-def test_guess_mime():
-    assert _guess_mime(b"\x89PNG....") == "image/png"
-    assert _guess_mime(b"\xff\xd8\xff....") == "image/jpeg"
-    assert _guess_mime(b"RIFF1234WEBPVP8") == "image/webp"
-    with pytest.raises(ImageGenerationError):
-        _guess_mime(b"GIF89a")
-
-
-# ---------- 조금 수정하기 ----------
-
-
-def test_adjustments_are_added_to_prompt():
-    prompt = build_image_prompt(
-        "소금빵",
-        "신메뉴 출시",
-        include_text=True,
-        adjustments=["더 밝게", "글자 더 크게"],
-    )
-    assert "brighter" in prompt
-    assert "larger" in prompt
-
-
-def test_text_adjustments_skipped_without_text():
-    prompt = build_image_prompt(
-        "소금빵",
-        "신메뉴 출시",
-        include_text=False,
-        adjustments=["글자 더 크게", "배경 단순하게"],
-    )
-    assert "larger" not in prompt
-    assert "simpler" in prompt
-
-
-def test_shorten_adjustment_changes_message(fake_model, monkeypatch):
-    monkeypatch.setattr(pipeline, "shorten_message", lambda message: "오픈 이벤트")
-    result = pipeline.generate_ad_image(
-        "청담 카페라떼",
-        "청담 카페라떼 오픈 기념 전 메뉴 이벤트",
-        backend="fake",
-        adjustments=["텍스트 짧게"],
-    )
-    assert result.message == "오픈 이벤트"
-    assert '"오픈 이벤트"' in result.prompt
-
-
-def test_shorten_works_in_template_mode(fake_model, monkeypatch):
-    monkeypatch.setattr(pipeline, "shorten_message", lambda message: "오픈 이벤트")
-    result = pipeline.generate_ad_image(
-        "청담 카페라떼",
-        "청담 카페라떼 오픈 기념 전 메뉴 이벤트",
-        generation_mode="template",
-        backend="fake",
-        adjustments=["텍스트 짧게"],
-    )
-    # 템플릿 모드는 웹에서 글자를 얹으니 줄인 문구가 결과로 넘어가야 함
-    assert result.message == "오픈 이벤트"
-
-
-def test_empty_message_checked_before_shorten(fake_model, monkeypatch):
-    def fail_if_called(message):
-        raise AssertionError("빈 문구인데 문구 줄이기를 호출했습니다")
-
-    monkeypatch.setattr(pipeline, "shorten_message", fail_if_called)
-    with pytest.raises(ValueError):
-        pipeline.generate_ad_image(
-            "청담 카페라떼", "  ", backend="fake", adjustments=["텍스트 짧게"]
+    def generate(self, instructions, user_input, max_tokens=300):
+        self.calls.append(instructions)
+        if self.fail:
+            raise TextGenerationError("Ollama 연결 실패")
+        if "카피라이터" in instructions:
+            text = '1. 갓 구운 버터 향, 오늘의 첫 소금빵\n- 따뜻한 온기에 담은 소금빵\n"입안 가득 고소한 풍미"'
+        elif "편집자" in instructions:
+            text = "오늘의 소금빵"
+        else:
+            text = "PRODUCT: a golden roll (소금빵)\nSCENE: Warm morning light on a wooden table."
+        return TextResult(
+            text=text, model=self.name, elapsed_sec=0.0, cost_usd=self.cost
         )
 
 
-# ---------- 광고 문구 추천 ----------
+class FakeImage:
+    """요청한 크기의 4분의 1로 단색 이미지를 돌려주는 가짜 이미지 모델."""
+
+    def __init__(self, name, fail=False, cost=0.0):
+        self.name = name
+        self.fail = fail
+        self.cost = cost
+        self.calls = []
+
+    def generate(self, prompt, width, height, reference_image=None, seed=None):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "size": (width, height),
+                "reference": reference_image,
+                "seed": seed,
+            }
+        )
+        if self.fail:
+            raise ImageGenerationError("GPU 메모리 부족")
+        return ImageResult(
+            image_bytes=png_bytes(width // 4, height // 4),
+            model=self.name,
+            elapsed_sec=0.1,
+            cost_usd=self.cost,
+            seed=seed if seed is not None else 7,
+        )
 
 
-class FakeTextModel(BaseTextModel):
-    """테스트용 가짜 텍스트 모델."""
+@pytest.fixture
+def fakes(monkeypatch):
+    """가짜 모델 4개를 끼워 넣습니다."""
+    gemma = FakeText("gemma4:12b-it-qat")
+    luna = FakeText("gpt-5.6-luna", cost=0.0004)
+    klein = FakeImage("FLUX.2 [klein] 4B")
+    flare = FakeImage("gpt-image-2.5-flare", cost=0.0136)
+    monkeypatch.setattr(ai_models, "get_gemma", lambda: gemma)
+    monkeypatch.setattr(ai_models, "get_luna", lambda: luna)
+    monkeypatch.setattr(ai_models, "get_klein", lambda: klein)
+    monkeypatch.setattr(ai_models, "get_flare", lambda: flare)
+    monkeypatch.setattr(config, "USE_FALLBACK", True)
+    return {"text": gemma, "gemma": gemma, "luna": luna, "klein": klein, "flare": flare}
 
-    def generate(self, instructions, user_input, **options):
-        text = '1. 갓 구운 버터 향\n- 오늘의 첫 소금빵\n\n"주말 한정 20% 할인"\n넷째 줄'
-        return TextResult(text=text, model="fake-text", elapsed_sec=0.1)
 
-
-def test_parse_copies_removes_numbering():
-    text = '1. 갓 구운 버터 향\n- 오늘의 첫 소금빵\n\n"주말 한정 20% 할인"\n넷째 줄'
-    assert parse_copies(text, 3) == [
-        "갓 구운 버터 향",
-        "오늘의 첫 소금빵",
-        "주말 한정 20% 할인",
+def test_parse_copies_removes_numbers_and_symbols():
+    assert parse_copies('1. 첫 문구\n- 둘째 문구\n"셋째"\n넷째', 3) == [
+        "첫 문구",
+        "둘째 문구",
+        "셋째",
     ]
 
 
-def test_suggest_ad_copies_with_fake_model(monkeypatch):
-    monkeypatch.setitem(registry.TEXT_MODELS, "fake-text", FakeTextModel)
-    registry.clear_loaded_models()
-    copies = suggest_ad_copies("소금빵", "신메뉴 출시", backend="fake-text")
-    assert copies == ["갓 구운 버터 향", "오늘의 첫 소금빵", "주말 한정 20% 할인"]
-    registry.clear_loaded_models()
+def test_suggest_ad_copies_returns_three(fakes):
+    copies = suggest_ad_copies("소금빵", "신메뉴 출시", style="따뜻한")
+    assert copies == [
+        "갓 구운 버터 향, 오늘의 첫 소금빵",
+        "따뜻한 온기에 담은 소금빵",
+        "입안 가득 고소한 풍미",
+    ]
 
 
-def test_empty_quality_uses_default(monkeypatch):
-    calls = []
+def test_suggest_ad_copies_requires_input(fakes):
+    with pytest.raises(ValueError):
+        suggest_ad_copies(" ", "신메뉴 출시")
+    assert fakes["text"].calls == []
 
-    class FakeImages:
-        def generate(self, **request):
-            calls.append(request)
-            raise RuntimeError("요청 내용만 확인하고 멈춤")
 
-    monkeypatch.setattr(OpenAIImageModel, "__init__", _fake_openai_init)
-    model = OpenAIImageModel("gpt-image-2.5-flare", "medium")
-    model.client = type("FakeClient", (), {"images": FakeImages()})()
+def test_shorten_message(fakes):
+    message, _, reason = shorten_message("갓 구운 버터 향 가득한 오늘의 첫 소금빵")
+    assert (message, reason) == ("오늘의 소금빵", "")
+
+
+def test_describe_uses_dictionary_for_known_item(fakes):
+    product, scene, source, _, _ = describe_for_image("소금빵", "신메뉴 출시", "따뜻한")
+    assert source == "품목 사전"
+    assert "butter roll" in product
+    assert scene == "Warm morning light on a wooden table"
+
+
+def test_describe_removes_korean_for_unknown_item(fakes):
+    product, scene, source, _, _ = describe_for_image("동네빵집 버터롤", "신메뉴 출시")
+    assert source == "텍스트 모델"
+    assert product == "a golden roll"
+    assert not re.search("[가-힣]", product + scene)
+
+
+def test_prompt_is_english_and_text_free():
+    prompt = build_image_prompt(
+        "a golden roll", "Warm light", purpose="instagram", style="따뜻한"
+    )
+    assert "No text" in prompt
+    assert "reference image" not in prompt
+    assert not re.search("[가-힣]", prompt)
+
+
+def test_prompt_with_reference_keeps_product():
+    prompt = build_image_prompt(
+        "a golden roll", "Warm light", has_reference=True, adjustments=["더 밝게"]
+    )
+    assert prompt.startswith("Use the product in the reference image")
+    assert "brighter" in prompt
+
+
+def test_sizes_are_multiples_of_16():
+    for purpose in PURPOSE_SIZES:
+        width, height = get_image_size(purpose)
+        assert width % 16 == 0 and height % 16 == 0
+    assert get_image_size("없는목적") == PURPOSE_SIZES["free"]
+
+
+def test_render_text_all_designs_keep_size():
+    background = png_bytes(512, 512)
+    for mood in list(DESIGNS) + [None]:
+        result = render_text(background, "갓 구운 버터 향, 오늘의 소금빵", mood)
+        image = Image.open(io.BytesIO(result))
+        assert image.size == (512, 512)
+        assert result != background
+
+
+def test_render_text_rare_glyph_uses_fallback_font():
+    result = render_text(png_bytes(512, 512), "똠양꿍 신메뉴", "밝고 경쾌한")
+    assert Image.open(io.BytesIO(result)).size == (512, 512)
+
+
+def test_quick_mode_uses_klein_and_overlays_text(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", purpose="youtube", style="밝고 경쾌한"
+    )
+    assert result.image_model == "FLUX.2 [klein] 4B"
+    assert result.image_fallback_reason == ""
+    assert result.text_model == "gemma4:12b-it-qat"
+    assert fakes["luna"].calls == []
+    assert result.image_bytes != result.background_bytes
+    assert fakes["klein"].calls[0]["size"] == (1536, 864)
+    assert result.cost_usd == 0
+    assert not re.search("[가-힣]", result.prompt)
+
+
+def test_template_mode_returns_image_only(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", generation_mode="template"
+    )
+    assert result.image_bytes == result.background_bytes
+
+
+def test_fallback_when_klein_fails(fakes):
+    fakes["klein"].fail = True
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert result.image_model == "gpt-image-2.5-flare"
+    assert "klein 실패" in result.image_fallback_reason
+    assert result.cost_usd > 0
+
+
+def test_no_fallback_raises(fakes, monkeypatch):
+    fakes["klein"].fail = True
+    monkeypatch.setattr(config, "USE_FALLBACK", False)
     with pytest.raises(ImageGenerationError):
-        model.generate("prompt", 1024, 1024, quality=None)
-    assert calls[0]["quality"] == "medium"
+        generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert fakes["flare"].calls == []
+
+
+def test_unknown_item_without_reference_goes_to_flare(fakes):
+    result = generate_ad_image("소금빵", "신메뉴 출시", style="따뜻한")
+    assert result.image_model == "gpt-image-2.5-flare"
+    assert result.product_source == "품목 사전"
+    assert fakes["klein"].calls == []
+
+
+def test_unknown_item_with_reference_uses_klein(fakes):
+    result = generate_ad_image(
+        "소금빵", "신메뉴 출시", reference_image=png_bytes(fmt="JPEG")
+    )
+    assert result.image_model == "FLUX.2 [klein] 4B"
+    assert result.used_reference
+    reference = fakes["klein"].calls[0]["reference"]
+    assert reference.startswith(b"\x89PNG")
+    assert result.prompt.startswith("Use the product in the reference image")
+
+
+def test_bad_reference_raises_value_error(fakes):
+    with pytest.raises(ValueError):
+        generate_ad_image(
+            "동네빵집 버터롤", "신메뉴 출시", reference_image=b"not an image"
+        )
+
+
+def test_empty_input_raises_before_any_model_call(fakes):
+    with pytest.raises(ValueError):
+        generate_ad_image("", "신메뉴 출시", adjustments=["텍스트 짧게"])
+    assert fakes["text"].calls == []
+    assert fakes["klein"].calls == []
+
+
+def test_shorten_chip_changes_message(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤",
+        "갓 구운 버터 향 가득한 오늘의 첫 소금빵",
+        adjustments=["텍스트 짧게"],
+    )
+    assert result.message == "오늘의 소금빵"
+
+
+def test_bigger_text_chip_changes_overlay(fakes):
+    normal = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", style="심플한")
+    bigger = generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", style="심플한", adjustments=["글자 더 크게"]
+    )
+    assert normal.image_bytes != bigger.image_bytes
+
+
+def test_unknown_style_is_not_in_prompt():
+    prompt = build_image_prompt("a golden roll", "Warm light", style="없는 분위기")
+    assert "Mood" not in prompt
+    assert not re.search("[가-힣]", prompt)
+
+
+def test_describe_reads_bold_labels(fakes, monkeypatch):
+    def bold_answer(instructions, user_input, max_tokens=300):
+        text = "**PRODUCT**: a red cake\n**Scene:** Soft light on a table."
+        return TextResult(text=text, model="fake-gemma", elapsed_sec=0.0)
+
+    monkeypatch.setattr(fakes["text"], "generate", bold_answer)
+    product, scene, *_ = describe_for_image("동네빵집 케이크", "신메뉴 출시")
+    assert product == "a red cake"
+    assert scene == "Soft light on a table"
+
+
+def test_result_size_is_real_image_size(fakes):
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", purpose="youtube")
+    image = Image.open(io.BytesIO(result.image_bytes))
+    assert (result.width, result.height) == image.size
+
+
+def test_gemma_retries_without_think(monkeypatch):
+    from just_make_it.core.ai_models import gemma
+
+    class Response:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self.text = str(payload)
+            self.payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise gemma.requests.HTTPError(self.text)
+
+        def json(self):
+            return self.payload
+
+    bodies = []
+
+    def fake_post(url, json, timeout):
+        bodies.append(dict(json))
+        if "think" in json:
+            return Response(400, {"error": "think not supported"})
+        return Response(200, {"message": {"content": "오늘의 소금빵"}})
+
+    monkeypatch.setattr(gemma.requests, "post", fake_post)
+    model = gemma.GemmaTextModel()
+    assert model.generate("규칙", "입력").text == "오늘의 소금빵"
+    assert "think" in bodies[0] and "think" not in bodies[1]
+
+
+def test_report_counts_models_and_cost():
+    from just_make_it.core.evaluation.make_report import build_report
+
+    base = {
+        "case_id": "C01",
+        "purpose": "free",
+        "product_name": "소금빵",
+        "message": "신메뉴",
+        "style": "",
+        "generation_mode": "quick",
+        "error": "",
+        "image": "images/C01.png",
+        "prompt": "p",
+        "elapsed_sec": "1",
+    }
+    rows = [
+        {**base, "model": "FLUX.2 [klein] 4B", "cost_usd": "0"},
+        {
+            **base,
+            "case_id": "C02",
+            "model": "gpt-image-2.5-flare",
+            "cost_usd": "0.0142",
+        },
+    ]
+    report = build_report({"run1": rows})
+    assert "FLUX.2 [klein] 4B 1, gpt-image-2.5-flare 1" in report
+    assert "0.0142" in report
+
+
+def test_seed_is_returned_and_reused(fakes):
+    first = generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert first.seed == 7
+    assert fakes["klein"].calls[0]["seed"] is None
+    generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", adjustments=["더 밝게"], seed=first.seed
+    )
+    assert fakes["klein"].calls[1]["seed"] == 7
+
+
+def test_detailed_and_natural_use_api_models(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤",
+        "신메뉴 출시",
+        image_quality="detailed",
+        text_quality="natural",
+    )
+    assert result.image_model == "gpt-image-2.5-flare"
+    assert result.text_model == "gpt-5.6-luna"
+    assert result.image_fallback_reason == ""
+    assert result.text_fallback_reason == ""
+    assert fakes["klein"].calls == []
+    assert fakes["gemma"].calls == []
+
+
+def test_gemma_fails_falls_back_to_luna(fakes):
+    fakes["gemma"].fail = True
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert result.text_model == "gpt-5.6-luna"
+    assert "Gemma 실패" in result.text_fallback_reason
+    assert result.image_model == "FLUX.2 [klein] 4B"
+
+
+def test_gemma_fails_without_fallback_raises(fakes, monkeypatch):
+    fakes["gemma"].fail = True
+    monkeypatch.setattr(config, "USE_FALLBACK", False)
+    with pytest.raises(TextGenerationError):
+        suggest_ad_copies("소금빵", "신메뉴 출시")
+    assert fakes["luna"].calls == []
+
+
+def test_suggest_with_natural_uses_luna(fakes):
+    copies = suggest_ad_copies("소금빵", "신메뉴 출시", text_quality="natural")
+    assert len(copies) == 3
+    assert fakes["gemma"].calls == []
+
+
+def test_wrong_quality_raises_before_any_model_call(fakes):
+    with pytest.raises(ValueError):
+        generate_ad_image("동네빵집 버터롤", "신메뉴 출시", image_quality="best")
+    with pytest.raises(ValueError):
+        generate_ad_image("동네빵집 버터롤", "신메뉴 출시", text_quality="best")
+    with pytest.raises(ValueError):
+        suggest_ad_copies("소금빵", "신메뉴 출시", text_quality="best")
+    assert fakes["gemma"].calls == [] and fakes["klein"].calls == []
+
+
+def test_cost_adds_flare_and_luna(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤",
+        "갓 구운 버터 향 가득한 오늘의 첫 소금빵",
+        image_quality="detailed",
+        text_quality="natural",
+        adjustments=["텍스트 짧게"],
+    )
+    # flare 1번 + luna 2번 (문구 줄이기, 영어 묘사)
+    assert result.cost_usd == pytest.approx(0.0136 + 0.0004 * 2)
+
+
+def test_flare_cost_splits_text_and_image_input():
+    from types import SimpleNamespace
+
+    from just_make_it.core.ai_models.flare import _cost_usd
+
+    usage = SimpleNamespace(
+        input_tokens=1100,
+        input_tokens_details=SimpleNamespace(text_tokens=100, image_tokens=1000),
+        output_tokens=1000,
+    )
+    assert _cost_usd(usage) == pytest.approx((100 * 5 + 1000 * 8 + 1000 * 30) / 1e6)
+    no_details = SimpleNamespace(input_tokens=100, output_tokens=1000)
+    assert _cost_usd(no_details) == pytest.approx((100 * 5 + 1000 * 30) / 1e6)
+    assert _cost_usd(None) == 0.0
+
+
+def test_luna_cost():
+    from types import SimpleNamespace
+
+    from just_make_it.core.ai_models.luna import LunaTextModel
+
+    model = LunaTextModel.__new__(LunaTextModel)
+    model.model = "gpt-5.6-luna"
+    response = SimpleNamespace(
+        output_text="오늘의 소금빵",
+        usage=SimpleNamespace(input_tokens=1000, output_tokens=500),
+    )
+    model.client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: response)
+    )
+    result = model.generate("규칙", "입력")
+    assert result.cost_usd == pytest.approx((1000 * 0.20 + 500 * 1.20) / 1e6)
