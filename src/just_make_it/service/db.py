@@ -37,7 +37,7 @@ def init(data_dir: Path, schema: Path = SCHEMA) -> None:
     storage.init(data_dir)
     _conn = sqlite3.connect(data_dir / "just_make_it.db", check_same_thread=False)
     _conn.row_factory = sqlite3.Row
-    _conn.executescript(schema.read_text())
+    _conn.executescript(schema.read_text(encoding="utf-8"))
     with _conn:
         _conn.execute("UPDATE generations SET status='error', error='서버 재시작' WHERE status='processing'")
         _conn.execute("UPDATE detail_pages SET status='error', error='서버 재시작' WHERE status='processing'")
