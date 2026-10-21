@@ -6,6 +6,13 @@
   color-scheme: light;
 }
 
+/* #how 같은 같은 페이지 링크를 부드럽게. 움직임 줄이기 설정한 사용자는 제외 */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
 body {
   @apply bg-white text-body text-ink antialiased;
 }
