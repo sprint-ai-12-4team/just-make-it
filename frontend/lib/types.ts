@@ -1,111 +1,69 @@
-/** 광고 목적(매체) */
-export type Purpose =
-  | "instagram"
-  | "commerce"
-  | "youtube"
-  | "kakao"
-  | "free";
+// 계약: docs/api_spec.md. 필드 이름은 API 그대로 snake_case
 
-/** 생성 방식 */
-export type GenerationMode = "quick" | "template" | "canvas";
+export type Purpose = "instagram" | "commerce" | "youtube" | "kakao" | "free";
+export type Status = "processing" | "success" | "error";
 
-export interface PurposeOption {
-  id: Purpose;
-  title: string;
-  description: string;
-  aspectHint: string;
-}
-
-export interface GenerationModeOption {
-  id: GenerationMode;
-  title: string;
-  description: string;
-  recommended?: boolean;
-}
-
-/** 생성 요청에 쓰는 폼 데이터 */
-export interface CreateFormData {
+export interface GenerateInput {
   purpose: Purpose;
-  productName: string;
+  product_name: string;
   message: string;
-  style?: string;
-  generationMode: GenerationMode;
-  /** 참고 이미지는 나중에 FormData로 전송 */
-  referenceImage?: File | null;
+  style: string | null;
+  adjustments: string[];
+  parent_id: string | null;
 }
 
-/** FastAPI /generate 응답 (초안) */
-export interface GenerateSuccessResponse {
-  status: "success";
+export interface Generation {
+  id: string;
+  status: Status;
   image_url: string;
-  generation_source: "local" | "openai";
+  message: string;
+  source: string; // 화면 노출 금지
+  width: number;
+  height: number;
+  parent_id?: string | null;
+  input?: Omit<GenerateInput, "parent_id">;
 }
 
-export interface GenerateProcessingResponse {
-  status: "processing";
-  job_id: string;
+export interface DetailInput {
+  product_name: string;
+  message: string;
+  features: string[];
+  style: string | null;
 }
 
-export type GenerateResponse =
-  | GenerateSuccessResponse
-  | GenerateProcessingResponse;
+export interface Section {
+  index: number;
+  role: "hero" | "feature" | "closing";
+  status: "pending" | Status;
+  title: string | null;
+  body: string | null;
+  image_url: string | null;
+}
 
-export const PURPOSE_OPTIONS: PurposeOption[] = [
-  {
-    id: "instagram",
-    title: "인스타그램",
-    description: "피드·스토리에 올릴 이미지",
-    aspectHint: "정사각 / 세로",
-  },
-  {
-    id: "commerce",
-    title: "스마트스토어 · 쿠팡",
-    description: "상품 썸네일·상세 이미지",
-    aspectHint: "상품 중심",
-  },
-  {
-    id: "youtube",
-    title: "유튜브 썸네일",
-    description: "클릭을 유도하는 강한 썸네일",
-    aspectHint: "16:9",
-  },
-  {
-    id: "kakao",
-    title: "카카오톡 · 문자",
-    description: "메시지에 첨부할 홍보 이미지",
-    aspectHint: "세로 / 정사각",
-  },
-  {
-    id: "free",
-    title: "자유롭게 만들기",
-    description: "용도에 맞춰 직접 설정",
-    aspectHint: "자유",
-  },
+export interface DetailPage {
+  id: string;
+  status: Status;
+  progress: { done: number; total: number };
+  sections: Section[];
+}
+
+export const PURPOSES: { id: Purpose; title: string; desc: string }[] = [
+  { id: "instagram", title: "인스타그램", desc: "피드에 올릴 정사각형 이미지" },
+  { id: "commerce", title: "스마트스토어 · 쿠팡", desc: "상품 대표 이미지나 상세페이지" },
+  { id: "youtube", title: "유튜브 썸네일", desc: "눈에 띄는 가로형 썸네일" },
+  { id: "kakao", title: "카카오톡 · 문자", desc: "메시지에 붙일 세로형 이미지" },
+  { id: "free", title: "자유롭게 만들기", desc: "어디든 쓸 수 있는 정사각형" },
 ];
 
-export const GENERATION_MODE_OPTIONS: GenerationModeOption[] = [
-  {
-    id: "quick",
-    title: "빠른 생성",
-    description: "텍스트까지 한 장에 바로 만들어 드려요",
-    recommended: true,
-  },
-  {
-    id: "template",
-    title: "템플릿 사용",
-    description: "미리 만든 레이아웃에 맞춰 생성해요",
-  },
-  {
-    id: "canvas",
-    title: "직접 편집",
-    description: "이미지와 글자를 따로 만든 뒤 배치해요",
-  },
-];
+export const STYLES = ["밝고 경쾌한", "고급스러운", "따뜻한", "심플한", "강렬한"];
 
-export const STYLE_CHIPS = [
-  "밝고 경쾌한",
-  "고급스러운",
-  "따뜻한",
-  "심플한",
-  "강렬한",
-] as const;
+// 서버로 보내는 칩. "글자 더 크게"는 글자를 화면에서 얹으므로 서버로 안 보냄
+export const ADJUSTMENTS = ["더 밝게", "배경 단순하게", "텍스트 짧게"];
+
+export const SIZES: Record<Purpose, [number, number]> = {
+  instagram: [1024, 1024],
+  commerce: [1024, 1024],
+  youtube: [1536, 864],
+  kakao: [1024, 1536],
+  free: [1024, 1024],
+};
