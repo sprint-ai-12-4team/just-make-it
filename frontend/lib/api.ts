@@ -51,15 +51,23 @@ async function call<T>(path: string, init: { method?: string; body?: BodyInit } 
   return data as T;
 }
 
+/** 서버는 PUBLIC_BASE_URL(http://VM)로 이미지 주소를 줌 → 프록시 경로로 바꿔 혼합 콘텐츠·canvas CORS 회피 */
+function viaProxy<T extends { image_url: string | null }>(x: T): T {
+  if (!x.image_url) return x;
+  const { pathname } = new URL(x.image_url, location.href);
+  return pathname.startsWith("/images/") ? { ...x, image_url: BASE + pathname } : x;
+}
+
 const real = {
   suggestCopies: (b: { product_name: string; message: string; style: string | null; text_model: TextModel }) =>
     call<{ copies: string[] }>("/copies", { method: "POST", body: toBody(b) }).then((r) => r.copies),
   generate: (b: GenerateInput, file?: File | null) =>
-    call<Generation>("/generate", { method: "POST", body: toBody(b, file) }),
-  getGeneration: (id: string) => call<Generation>(`/generations/${id}`),
+    call<Generation>("/generate", { method: "POST", body: toBody(b, file) }).then(viaProxy),
+  getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
   startDetailPage: (b: DetailInput, file?: File | null) =>
     call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),
-  getDetailPage: (id: string) => call<DetailPage>(`/detail-pages/${id}`),
+  getDetailPage: (id: string) =>
+    call<DetailPage>(`/detail-pages/${id}`).then((d) => ({ ...d, sections: d.sections.map(viaProxy) })),
   regenerateSection: (id: string, index: number, adjustments: string[]) =>
     call<unknown>(`/detail-pages/${id}/sections/${index}`, {
       method: "POST",

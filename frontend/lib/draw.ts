@@ -23,6 +23,21 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+/** 서버가 어차피 2048px로 줄임 → 미리 줄여 업로드 시간·프록시 크기 제한을 피함. 투명 배경 유지하려고 WEBP */
+export async function shrinkPhoto(file: File, max = 2048): Promise<File> {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * scale);
+  canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext("2d")!.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close();
+  // WEBP 인코딩을 못 하는 브라우저는 PNG로 돌려줌 (서버는 둘 다 받음)
+  const blob = await new Promise<Blob | null>((ok) => canvas.toBlob(ok, "image/webp", 0.9));
+  if (!blob || blob.size >= file.size) return file;
+  return new File([blob], file.name.replace(/\.\w+$/, "") + (blob.type === "image/webp" ? ".webp" : ".png"), { type: blob.type });
+}
+
 /** 한글은 글자 단위로도 줄바꿈. 공백이 있으면 공백에서 우선 끊음 */
 export function wrap(measure: (s: string) => number, text: string, max: number): string[] {
   const lines: string[] = [];

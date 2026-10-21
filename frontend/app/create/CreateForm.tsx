@@ -2,6 +2,7 @@
 
 import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
+import { shrinkPhoto } from "@/lib/draw";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
 import { ChevronLeft, ImagePlus, Sparkles, X } from "lucide-react";
@@ -32,10 +33,12 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
 
   const ready = name.trim() && message.trim();
 
-  function pickPhoto(file: File | undefined) {
+  async function pickPhoto(file: File | undefined) {
     setPhotoError("");
     if (!file) return;
     if (!PHOTO_TYPES.includes(file.type)) return setPhotoError("PNG, JPG, WEBP 사진만 올릴 수 있어요.");
+    // 휴대폰 원본은 10MB를 넘기 쉬움 → 줄인 뒤의 크기로 검사
+    file = await shrinkPhoto(file).catch(() => file!);
     if (file.size > MAX_PHOTO) return setPhotoError("사진은 10MB 이하로 올려 주세요.");
     setPhoto(file);
     setPhotoUrl(URL.createObjectURL(file));
