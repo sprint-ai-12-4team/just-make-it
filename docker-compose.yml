@@ -36,13 +36,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    # 개발 시 --reload 사용. 프로덕션 Dockerfile CMD는 --workers 1 고정
+    # 개발 시 프로덕션 Dockerfile CMD는 --workers 1 고정
     command: >
       uvicorn just_make_it.serving.main:app
       --host 0.0.0.0
       --port 8000
       --workers 1
-      --reload
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
