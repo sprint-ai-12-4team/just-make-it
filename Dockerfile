@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 의존성 파일만 먼저 복사 (레이어 캐시 활용)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 
 # 가상환경 생성 + 의존성 설치 (프로덕션용, dev 의존성 제외)
 ENV UV_COMPILE_BYTECODE=1
