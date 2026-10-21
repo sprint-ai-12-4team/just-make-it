@@ -10,11 +10,13 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "openai>=3.35.1",
-    "pillow>=10.3",
     "pydantic-settings>=2.3",
     "python-dotenv>=1.2.4",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",
+    "fonttools>=4.67.0",
+    "pillow>=13.0.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]

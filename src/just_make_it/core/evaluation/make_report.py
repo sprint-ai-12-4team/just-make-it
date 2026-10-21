@@ -6,13 +6,14 @@
 
 import csv
 import html
+from collections import Counter
 from pathlib import Path
 
 RESULTS_DIR = Path(__file__).parent / "results"
 SCORE_NAMES = {
     "score_prompt": "프롬프트 반영",
     "score_quality": "이미지 품질",
-    "score_text": "한글 정확도",
+    "score_text": "문구 디자인",
     "score_usable": "광고 활용성",
 }
 
@@ -30,6 +31,23 @@ def load_runs():
     return runs
 
 
+def _numbers(rows, column):
+    """빈칸과 숫자가 아닌 값을 뺀 숫자 목록."""
+    values = []
+    for r in rows:
+        try:
+            values.append(float(r.get(column, "")))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def total(rows, column):
+    """숫자 칸의 합계. 값이 없으면 -"""
+    values = _numbers(rows, column)
+    return f"{sum(values):.4f}" if values else "-"
+
+
 def average(rows, column):
     """빈칸과 숫자가 아닌 값을 빼고 평균을 계산합니다.
 
@@ -42,12 +60,7 @@ def average(rows, column):
     Returns:
         str: 소수점 둘째 자리 평균, 값이 없으면 -
     """
-    values = []
-    for r in rows:
-        try:
-            values.append(float(r.get(column, "")))
-        except ValueError:
-            continue
+    values = _numbers(rows, column)
     return f"{sum(values) / len(values):.2f}" if values else "-"
 
 
@@ -63,15 +76,20 @@ def build_report(runs):
     esc = html.escape
     head = "".join(f"<th>{name}</th>" for name in SCORE_NAMES.values())
     summary = [
-        f"<tr><th>실행</th><th>모델</th><th>평균 시간(초)</th>{head}<th>실패</th></tr>"
+        (
+            "<tr><th>실행</th><th>사용 모델(장)</th><th>평균 시간(초)</th>"
+            f"<th>총 비용($)</th>{head}<th>실패</th></tr>"
+        )
     ]
     for run_id, rows in runs.items():
         scores = "".join(f"<td>{average(rows, col)}</td>" for col in SCORE_NAMES)
         errors = sum(1 for r in rows if r["error"])
-        model = esc(rows[0]["model"] or "-")
+        counts = Counter(r.get("model") for r in rows if r.get("model"))
+        models = esc(", ".join(f"{m} {n}" for m, n in counts.items()) or "-")
         summary.append(
-            f"<tr><td>{esc(run_id)}</td><td>{model}</td>"
-            f"<td>{average(rows, 'elapsed_sec')}</td>{scores}<td>{errors}</td></tr>"
+            f"<tr><td>{esc(run_id)}</td><td>{models}</td>"
+            f"<td>{average(rows, 'elapsed_sec')}</td><td>{total(rows, 'cost_usd')}</td>"
+            f"{scores}<td>{errors}</td></tr>"
         )
 
     cases = {}
@@ -102,6 +120,8 @@ def build_report(runs):
             cells.append(
                 f"<td><b>{esc(run_id)}</b>{body}<p>{scores}</p>"
                 f"<p>{esc(r.get('comment', ''))}</p>"
+                f"<p>{esc(r.get('model', ''))} {esc(r.get('fallback_reason', ''))}</p>"
+                f"<p>{esc(r.get('text_model', ''))} {esc(r.get('text_fallback_reason', ''))}</p>"
                 f"<details><summary>프롬프트</summary>{esc(r['prompt'])}</details></td>"
             )
         sections.append(
