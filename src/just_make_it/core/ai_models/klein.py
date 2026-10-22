@@ -1,5 +1,7 @@
-"""기본 이미지 모델: FLUX.2 [klein] 4B. VM GPU에서 diffusers로 돌립니다.
+"""기본 이미지 모델: FLUX.2 [klein] 4B fp8. VM GPU에서 diffusers로 돌립니다.
 
+fp8 저장소에는 이미지를 그리는 본체(transformer) 파일 하나만 있어서,
+본체는 fp8 파일로 불러오고(fp8_loader.py) 텍스트 인코더, VAE, 설정은 원본 저장소에서 가져옵니다.
 torch, diffusers는 GPU 서버에만 설치되어 있을 수 있어서 이 파일 안에서만 불러옵니다.
 """
 
@@ -19,29 +21,42 @@ GUIDANCE = 1.0
 
 
 class KleinImageModel:
-    """FLUX.2 [klein] 4B. 참고 사진 기능을 지원합니다."""
+    """FLUX.2 [klein] 4B fp8. 참고 사진 기능을 지원합니다."""
 
-    def __init__(self, repo=config.KLEIN_MODEL, cpu_offload=config.KLEIN_CPU_OFFLOAD):
+    def __init__(
+        self,
+        repo=config.KLEIN_MODEL,
+        fp8_repo=config.KLEIN_FP8_REPO,
+        fp8_file=config.KLEIN_FP8_FILE,
+        cpu_offload=config.KLEIN_CPU_OFFLOAD,
+    ):
         """모델을 내려받아 GPU에 올립니다.
 
         Args:
-            repo: Hugging Face 모델 저장소
+            repo: 원본 저장소 (텍스트 인코더, VAE, 설정)
+            fp8_repo: fp8 본체 파일이 있는 저장소
+            fp8_file: fp8 본체 파일 이름
             cpu_offload: True면 GPU 메모리를 아끼는 대신 느려짐
 
         Raises:
             ImageGenerationError: GPU가 없거나 모델을 불러오지 못했을 때
         """
-        self.model = "FLUX.2 [klein] 4B"
+        self.model = "FLUX.2 [klein] 4B fp8"
         self.lock = threading.Lock()
         try:
             import torch
             from diffusers import Flux2KleinPipeline
+            from huggingface_hub import hf_hub_download
+
+            from just_make_it.core.ai_models.fp8_loader import load_fp8_transformer
 
             if not torch.cuda.is_available():
                 raise RuntimeError("GPU를 찾을 수 없습니다.")
             self.torch = torch
+            checkpoint = hf_hub_download(fp8_repo, fp8_file)
+            transformer = load_fp8_transformer(checkpoint, repo)
             self.pipe = Flux2KleinPipeline.from_pretrained(
-                repo, torch_dtype=torch.bfloat16
+                repo, transformer=transformer, torch_dtype=torch.bfloat16
             )
             if cpu_offload:
                 self.pipe.enable_model_cpu_offload()
