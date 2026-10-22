@@ -17,7 +17,8 @@ VM의 로컬 모델(klein, Gemma)이 실패하면 API 모델(flare, luna)로 폴
 - combined: 문구를 얹은 이미지. 글자 없는 이미지와 문구 레이어도 같이 줘서 웹에서 문구를 옮길 수 있음
 - image: 글자 없는 이미지만. 문구는 얹지 않고 추천 글꼴과 위치만 줌
 - text: 디자인된 문구 레이어(투명 PNG)만. 이미지 모델을 부르지 않아 GPU와 비용이 들지 않음
-세 형태 모두 문구 글꼴, 글자 크기, 위치, 크기(text_font, text_font_size, text_position, text_size)를 같이 줌
+세 형태 모두 문구 위치, 글꼴, 크기(text_layout)와 문구 레이어 위치(text_box)를 같이 줌.
+글자만 고칠 때는 이미지를 다시 만들지 않고 text_overlay.render_text로 background_bytes에 다시 얹음
 """
 
 import io
@@ -37,14 +38,12 @@ from just_make_it.core.copywriter import (
 from just_make_it.core.product_dictionary import lookup
 from just_make_it.core.prompt_builder import build_image_prompt, get_image_size
 from just_make_it.core.text_overlay import (
+    overlay_text,
     place_text,
-    render_text,
     render_text_layer,
 )
 
 OUTPUTS = ("combined", "image", "text")
-# 예전 generation_mode 값. 서빙이 output으로 옮길 때까지 같은 뜻의 output으로 바꿔서 받음
-LEGACY_MODES = {"quick": "combined", "template": "image", "canvas": "image"}
 SHORTEN_ADJUSTMENT = "텍스트 짧게"
 BIGGER_TEXT_ADJUSTMENT = "글자 더 크게"
 IMAGE_QUALITIES = ("fast", "detailed")
@@ -59,10 +58,9 @@ class AdImageResult:
         image_bytes: 최종 PNG. combined면 문구를 얹은 이미지, image면 글자 없는 이미지, text면 None
         background_bytes: 글자 없는 원본 PNG. text면 None
         text_layer_bytes: 디자인된 문구만 그린 투명 PNG. image면 None
-        text_font: 문구 글꼴 이름 (예: Jua). 웹에서 같은 글꼴을 불러올 때 사용
-        text_font_size: 글자 크기(px). 이미지 크기 기준
-        text_position: 문구 레이어 왼쪽 위 위치 (x, y). combined면 실제로 얹은 위치, 나머지는 추천 위치
-        text_size: 문구 레이어 크기 (가로, 세로). 테두리, 그림자, 장식 포함
+        text_layout: 문구 위치, 글꼴, 크기 {"position", "font", "size_scale"}.
+            combined면 실제로 얹은 값, 나머지는 추천 값. 글자 고치기의 처음 값으로 씀
+        text_box: 문구 레이어 위치와 크기 (x, y, 가로, 세로). 테두리, 그림자, 장식 포함
         message: 이미지에 쓴 문구 (텍스트 짧게를 누르면 줄어든 문구)
         prompt: 실제로 사용한 영어 이미지 프롬프트. text면 빈 문자열
         image_model: 실제로 이미지를 만든 모델. text면 빈 문자열
@@ -85,10 +83,8 @@ class AdImageResult:
     image_bytes: bytes | None
     background_bytes: bytes | None
     text_layer_bytes: bytes | None
-    text_font: str
-    text_font_size: int
-    text_position: tuple[int, int]
-    text_size: tuple[int, int]
+    text_layout: dict
+    text_box: tuple[int, int, int, int]
     message: str
     prompt: str
     image_model: str
@@ -118,7 +114,6 @@ def generate_ad_image(
     seed=None,
     image_quality="fast",
     text_quality="basic",
-    generation_mode=None,
 ):
     """프론트 입력값으로 광고 이미지를 생성합니다.
 
@@ -133,7 +128,6 @@ def generate_ad_image(
         seed: 비우면 랜덤. 조금 수정하기 때 이전 결과의 seed를 넘기면 구도가 유지됨 (klein만 적용)
         image_quality: 그림 품질. fast(빠르게, klein) 또는 detailed(더 정교하게, flare)
         text_quality: 문구 품질. basic(기본, Gemma) 또는 natural(더 자연스럽게, luna)
-        generation_mode: 예전 이름. 넘기면 quick은 combined, template과 canvas는 image로 바꿔서 씀
 
     Returns:
         AdImageResult: 이미지와 생성 정보
@@ -146,12 +140,6 @@ def generate_ad_image(
     total_start = time.perf_counter()
     if not product_name.strip() or not message.strip():
         raise ValueError("상품 이름과 핵심 메시지는 꼭 입력해야 합니다.")
-    if generation_mode is not None:
-        if generation_mode not in LEGACY_MODES:
-            raise ValueError(
-                f"generation_mode는 {list(LEGACY_MODES)} 중 하나여야 합니다."
-            )
-        output = LEGACY_MODES[generation_mode]
     if output not in OUTPUTS:
         raise ValueError(f"output은 {OUTPUTS} 중 하나여야 합니다.")
     if image_quality not in IMAGE_QUALITIES:
@@ -225,7 +213,7 @@ def generate_ad_image(
 
     start = time.perf_counter()
     if output == "combined":
-        final_bytes, layer_bytes, placement = render_text(
+        final_bytes, layer_bytes, placement = overlay_text(
             result.image_bytes, message, style, size_scale=size_scale
         )
     else:
@@ -261,12 +249,7 @@ def generate_ad_image(
 
 def _placement_fields(placement):
     """TextPlacement를 결과 칸 이름에 맞게 바꿉니다."""
-    return {
-        "text_font": placement.font,
-        "text_font_size": placement.font_size,
-        "text_position": (placement.x, placement.y),
-        "text_size": (placement.width, placement.height),
-    }
+    return {"text_layout": placement.layout, "text_box": placement.box}
 
 
 def _generate_image(

@@ -102,7 +102,7 @@ def build_report(runs):
         first = next(iter(by_run.values()))
         title = (
             f"{case_id} | {first['purpose']} | {first['product_name']} | "
-            f"{first['message']} | {first['style']} | {first.get('output') or first.get('generation_mode', '')}"
+            f"{first['message']} | {first['style']} | {first.get('output', '')}"
         )
         cells = []
         for run_id in runs:
