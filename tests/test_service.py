@@ -31,6 +31,28 @@ def test_generation_flow(tmp_path):
     assert db.get_generation("없음") is None
 
 
+def test_text_edit_flow(tmp_path):
+    gid = db.start_generation("c1", INPUT, backend="local", model="klein")
+    assert db.background(gid) is None  # 아직 processing
+    layout = {"position": "top", "font": "jua", "size_scale": 1.0}
+    g = db.finish_generation(gid, b"txt", message="신메뉴", width=1, height=1, background=b"bg", text_layout=layout)
+    assert g["background_url"].endswith(f"/images/{gid}-bg.png") and g["text_layout"] == layout
+    assert db.background(gid) == b"bg"
+
+    first = db.update_text(gid, b"txt2", message="고친 문구", text_layout={**layout, "position": "bottom"})
+    second = db.update_text(gid, b"txt3", message="또 고침", text_layout=layout)
+    assert first["image_url"] != g["image_url"] != second["image_url"]
+    assert second["message"] == "또 고침" and db.get_generation(gid)["text_layout"] == layout
+    images = tmp_path / "images"
+    assert (images / f"{gid}.png").exists()  # 첫 결과는 남김
+    assert not (images / first["image_url"].rsplit("/", 1)[1]).exists()  # 중간 결과는 지움
+    assert (images / second["image_url"].rsplit("/", 1)[1]).read_bytes() == b"txt3"
+
+    old = db.start_generation("c1", INPUT, backend="local", model="klein")
+    assert db.finish_generation(old, b"png", message="", width=1, height=1)["background_url"] is None
+    assert db.background(old) is None  # 원본 없는 예전 결과는 글자 고치기 불가
+
+
 def test_restart_marks_processing_as_error(tmp_path):
     gid = db.start_generation("c1", INPUT, backend="local", model="klein")
     db.init(tmp_path, SCHEMA)

@@ -1,5 +1,5 @@
 import { mock } from "./mock";
-import type { DetailInput, DetailPage, GenerateInput, Generation, TextModel } from "./types";
+import type { DetailInput, DetailPage, GenerateInput, Generation, TextLayout, TextModel } from "./types";
 
 // next.config.ts의 rewrites로 NEXT_PUBLIC_API_URL에 프록시. https(Vercel) → http(VM) 혼합 콘텐츠·CORS 회피
 const BASE = "/api/backend";
@@ -64,6 +64,8 @@ const real = {
   generate: (b: GenerateInput, file?: File | null) =>
     call<Generation>("/generate", { method: "POST", body: toBody(b, file) }).then(viaProxy),
   getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
+  editText: (id: string, b: Partial<TextLayout> & { message?: string }) =>
+    call<Generation>(`/generations/${id}/text`, { method: "POST", body: toBody(b) }).then(viaProxy),
   startDetailPage: (b: DetailInput, file?: File | null) =>
     call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),
   getDetailPage: (id: string) =>

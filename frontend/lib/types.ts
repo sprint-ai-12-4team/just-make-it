@@ -15,11 +15,23 @@ export interface GenerateInput {
   image_model: ImageModel;
 }
 
+export type TextPosition = "top" | "middle" | "bottom";
+export type FontId = "jua" | "yeonsung" | "batang" | "dodum" | "blackhan";
+
+/** 서버가 얹은 글자 위치·글꼴·크기 (api_spec 5장) */
+export interface TextLayout {
+  position: TextPosition;
+  font: FontId;
+  size_scale: number;
+}
+
 export interface Generation {
   id: string;
   status: Status;
-  image_url: string;
+  image_url: string; // 글자 얹은 최종 이미지 (text_layout이 없는 예전 결과는 글자 없는 이미지)
+  background_url?: string | null;
   message: string;
+  text_layout?: TextLayout | null;
   source: string; // 화면 노출 금지
   width: number;
   height: number;
@@ -61,8 +73,14 @@ export const PURPOSES: { id: Purpose; title: string; desc: string }[] = [
 
 export const STYLES = ["밝고 경쾌한", "고급스러운", "따뜻한", "심플한", "강렬한"];
 
-// 서버로 보내는 칩. "글자 더 크게"는 글자를 화면에서 얹으므로 서버로 안 보냄
+// 서버로 보내는 칩. "글자 더 크게"는 글자 고치기(size_scale)에서 처리
 export const ADJUSTMENTS = ["더 밝게", "배경 단순하게", "텍스트 짧게"];
+
+export const POSITIONS: [TextPosition, string][] = [["top", "위"], ["middle", "가운데"], ["bottom", "아래"]];
+export const FONTS: [FontId, string][] = [
+  ["jua", "주아"], ["yeonsung", "연성"], ["batang", "고운바탕"], ["dodum", "고운돋움"], ["blackhan", "검은고딕"],
+];
+export const BIG_TEXT = 1.25;
 
 export const SIZES: Record<Purpose, [number, number]> = {
   instagram: [1024, 1024],

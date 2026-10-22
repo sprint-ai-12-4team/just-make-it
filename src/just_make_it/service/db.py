@@ -5,6 +5,7 @@
   상세페이지: start_detail_page → (텍스트) → set_detail_sections | fail_detail_page
              → 섹션마다 start_generation(detail_page_id=, section_index=) → finish | fail
   조회: get_generation, get_detail_page / 제한: count_today, has_running_detail_page
+  글자 고치기: background(원본 바이트) → (core render_text) → update_text
 
 ponytail: 로컬 SQLite·디스크는 ms 단위라 동기 함수. 이벤트 루프가 막히면 서빙에서 asyncio.to_thread로 감싸기
 """
@@ -74,18 +75,32 @@ def start_generation(
 
 
 def finish_generation(
-    gid: str, image: bytes, *, message: str, width: int, height: int, params: dict | None = None, **result
+    gid: str,
+    image: bytes,
+    *,
+    message: str,
+    width: int,
+    height: int,
+    background: bytes | None = None,
+    text_layout: dict | None = None,
+    params: dict | None = None,
+    **result,
 ) -> dict:
-    """이미지 저장 + 성공 기록. result: backend(fallback이면 바뀐 값), model, seed, image_ms 등 _RESULT_COLS."""
+    """이미지 저장 + 성공 기록. result: backend(fallback이면 바뀐 값), model, seed, image_ms 등 _RESULT_COLS.
+
+    image: 글자를 얹은 최종 이미지. background: 글자 없는 원본 (글자 고치기용). text_layout: {position, font, size_scale}
+    """
     if bad := set(result) - _RESULT_COLS:
         raise TypeError(f"모르는 열: {bad}")
     path = storage.save(f"{gid}.png", image)
     params = {**(params or {}), "width": width, "height": height}
+    if background is not None:
+        params["background_path"] = storage.save(f"{gid}-bg.png", background)
     sets = "".join(f", {k}=?" for k in result)
     _run(
         f"""UPDATE generations SET status='success', image_path=?, copy_json=?, params_json=?{sets}
             WHERE id=?""",
-        (path, json.dumps({"message": message}, ensure_ascii=False), json.dumps(params), *result.values(), gid),
+        (path, _copy_json(message, text_layout), json.dumps(params), *result.values(), gid),
     )
     _close_detail_page_if_done(gid)
     return get_generation(gid)
@@ -97,6 +112,32 @@ def fail_generation(gid: str, error: str) -> None:
     _close_detail_page_if_done(gid)
 
 
+def _copy_json(message: str, text_layout: dict | None) -> str:
+    return json.dumps({"message": message, "text_layout": text_layout}, ensure_ascii=False)
+
+
+def background(gid: str) -> bytes | None:
+    """글자 없는 원본 이미지. 성공한 결과가 아니거나 원본을 저장하지 않았으면 None."""
+    rows = _run("SELECT status, params_json FROM generations WHERE id=?", (gid,))
+    if not rows or rows[0]["status"] != "success":
+        return None
+    name = json.loads(rows[0]["params_json"] or "{}").get("background_path")
+    return storage.load(name) if name else None
+
+
+def update_text(gid: str, image: bytes, *, message: str, text_layout: dict) -> dict:
+    """글자 고치기 결과 저장. 파일 이름을 바꿔 image_url이 새 주소가 됨 (/images 캐시 회피). 이전 파일은 지움."""
+    old = _run("SELECT image_path FROM generations WHERE id=?", (gid,))[0]["image_path"]
+    path = storage.save(f"{gid}-{uuid.uuid4().hex[:8]}.png", image)
+    _run(
+        "UPDATE generations SET image_path=?, copy_json=? WHERE id=?",
+        (path, _copy_json(message, text_layout), gid),
+    )
+    if old != f"{gid}.png":  # 첫 결과 파일은 남김 (이전에 공유된 링크용)
+        storage.remove(old)
+    return get_generation(gid)
+
+
 def get_generation(gid: str) -> dict | None:
     rows = _run("SELECT * FROM generations WHERE id=?", (gid,))
     if not rows:
@@ -105,11 +146,14 @@ def get_generation(gid: str) -> dict | None:
     params = json.loads(r["params_json"] or "{}")
     input = json.loads(r["input_json"])
     input.pop("reference_image_path", None)
+    copy = json.loads(r["copy_json"] or "{}")
     return {
         "id": r["id"],
         "status": r["status"],
         "image_url": storage.url(r["image_path"]),
-        "message": json.loads(r["copy_json"])["message"] if r["copy_json"] else input.get("message"),
+        "background_url": storage.url(params.get("background_path")),
+        "message": copy.get("message", input.get("message")),
+        "text_layout": copy.get("text_layout"),
         "source": r["backend"],
         "width": params.get("width"),
         "height": params.get("height"),
