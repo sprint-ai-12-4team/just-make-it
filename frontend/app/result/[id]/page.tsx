@@ -1,13 +1,16 @@
 "use client";
 
 import { Shell } from "@/components/Shell";
+import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
-import { ADJUSTMENTS, BIG_TEXT, FONTS, POSITIONS, type Generation, type TextLayout } from "@/lib/types";
-import { Check, Download, Link2, RefreshCw } from "lucide-react";
+import { save } from "@/lib/draw";
+import { POSITION_Y, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
+import { ADJUSTMENTS, type Generation } from "@/lib/types";
+import { Check, Download, Link2, Pencil, RefreshCw, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function Page() {
   return (
@@ -20,9 +23,10 @@ export default function Page() {
 function ResultPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [g, setG] = useState<Generation | null>(null);
-  const [title, setTitle] = useState("");
-  const [editing, setEditing] = useState(false);
+  // null이면 서버가 얹은 image_url 그대로. 값이 있으면 background_url 위에 직접 얹는 중
+  const [edit, setEdit] = useState<TextState | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -31,26 +35,20 @@ function ResultPage() {
   useEffect(() => {
     api
       .getGeneration(id)
-      .then((r) => {
-        setG(r);
-        setTitle(r.message);
-      })
+      .then(setG)
       .catch((e) => setError(e.message));
   }, [id]);
 
-  /** 서버가 글자 없는 원본에 다시 얹음 (재생성 아님, 1초 이내) */
-  async function editText(b: Partial<TextLayout> & { message?: string }) {
-    setEditing(true);
-    setError("");
-    try {
-      const next = await api.editText(id, b);
-      setG(next);
-      setTitle(next.message);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setEditing(false);
-    }
+  /** 서버가 얹은 위치·크기·분위기에서 시작 */
+  function startEdit(r: Generation) {
+    const l = r.text_layout;
+    setEdit({
+      text: r.message,
+      style: styleFor(r.input?.style).id,
+      x: 0.5,
+      y: POSITION_Y[l?.position ?? "top"],
+      scale: l?.size_scale ?? 1,
+    });
   }
 
   async function remake(adjustments: string[]) {
@@ -59,8 +57,9 @@ function ResultPage() {
     setError("");
     try {
       // ponytail: 원본 사진은 조회 응답에 없어 다시 만들 때 빠짐. 서버가 parent_id로 원본 사진을 재사용하면 해결
-      // 글자 고치기로 바꾼 문구(g.message)를 이어 씀. g.input.message는 처음 입력값
-      const next = await api.generate({ ...g.input, message: g.message, style: g.input.style ?? null, adjustments, parent_id: g.id });
+      // 직접 고친 문구를 이어 씀. g.input.message는 처음 입력값
+      const message = edit?.text.trim() || g.message;
+      const next = await api.generate({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
       router.push(`/result/${next.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -86,16 +85,26 @@ function ResultPage() {
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
-      <div className="overflow-hidden rounded-card bg-mist shadow-sm" aria-busy={editing}>
-        {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
-        <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className={`block h-auto w-full transition-opacity ${editing ? "opacity-60" : ""}`} />
-      </div>
+      {edit && g.background_url ? (
+        <TextCanvas src={g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
+      ) : (
+        <div className="overflow-hidden rounded-card bg-mist shadow-sm">
+          {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
+          <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className="block h-auto w-full" />
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        {/* 프록시 덕분에 같은 출처라 download 속성이 동작 */}
-        <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
-          <Download aria-hidden className="size-5" /> 내 기기에 저장
-        </a>
+        {edit ? (
+          <button type="button" className="btn-fill" onClick={() => save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError)}>
+            <Download aria-hidden className="size-5" /> 내 기기에 저장
+          </button>
+        ) : (
+          // 프록시 덕분에 같은 출처라 download 속성이 동작
+          <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
+            <Download aria-hidden className="size-5" /> 내 기기에 저장
+          </a>
+        )}
         <button type="button" className="btn-line" onClick={copyLink} aria-live="polite">
           {copied ? <Check aria-hidden className="size-5" /> : <Link2 aria-hidden className="size-5" />}
           {copied ? "링크를 복사했어요" : "링크 복사"}
@@ -104,10 +113,15 @@ function ResultPage() {
 
       {error && <Notice>{error}</Notice>}
 
-      {/* text_layout이 없으면 서빙이 아직 글자 고치기를 지원하지 않는 응답 (api_spec 10-22 결정 이전) */}
-      {g.text_layout && (
-        <TextEditor layout={g.text_layout} message={g.message} title={title} setTitle={setTitle} busy={editing} onEdit={editText} />
-      )}
+      {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
+      {g.background_url &&
+        (edit ? (
+          <TextEditor state={edit} onChange={setEdit} onReset={() => setEdit(null)} />
+        ) : (
+          <button type="button" className="btn-line" onClick={() => startEdit(g)}>
+            <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
+          </button>
+        ))}
 
       <section className="card flex flex-col gap-6">
         <h2 className="text-h-sm font-bold">그림이 마음에 안 드세요?</h2>
@@ -134,51 +148,49 @@ function ResultPage() {
   );
 }
 
+
 interface EditorProps {
-  layout: TextLayout;
-  message: string;
-  title: string;
-  setTitle: (v: string) => void;
-  busy: boolean;
-  onEdit: (b: Partial<TextLayout> & { message?: string }) => void;
+  state: TextState;
+  onChange: (s: TextState) => void;
+  onReset: () => void;
 }
 
-/** 문구는 버튼으로, 위치·글꼴·크기는 누르는 즉시 서버에 반영 */
-function TextEditor({ layout, message, title, setTitle, busy, onEdit }: EditorProps) {
-  const big = layout.size_scale >= BIG_TEXT;
+/** 문구·스타일·크기. 위치는 미리보기에서 끌어서 (또는 방향키) */
+function TextEditor({ state, onChange, onReset }: EditorProps) {
   return (
     <section className="card flex flex-col gap-6">
-      <h2 className="text-h-sm font-bold">글자 고치기</h2>
-      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요.</p>
+      <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
+      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
       <div>
         <label htmlFor="t" className="label">문구</label>
-        <textarea id="t" rows={2} className="field" value={title} onChange={(e) => setTitle(e.target.value)} />
-        <button
-          type="button"
-          className="btn-line mt-3"
-          disabled={busy || !title.trim() || title.trim() === message}
-          onClick={() => onEdit({ message: title.trim() })}
-        >
-          문구 바꾸기
-        </button>
+        <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
       </div>
-      <fieldset disabled={busy}>
-        <legend className="label">글자 위치</legend>
+      <fieldset>
+        <legend className="label">글자 스타일</legend>
         <div className="flex flex-wrap gap-2">
-          {POSITIONS.map(([v, t]) => (
-            <Chip key={v} on={layout.position === v} onClick={() => onEdit({ position: v })}>{t}</Chip>
-          ))}
-          <Chip on={big} onClick={() => onEdit({ size_scale: big ? 1 : BIG_TEXT })}>글자 더 크게</Chip>
-        </div>
-      </fieldset>
-      <fieldset disabled={busy}>
-        <legend className="label">글꼴</legend>
-        <div className="flex flex-wrap gap-2">
-          {FONTS.map(([v, t]) => (
-            <Chip key={v} on={layout.font === v} onClick={() => onEdit({ font: v })}>{t}</Chip>
+          {TEXT_STYLES.map((s) => (
+            <Chip key={s.id} on={state.style === s.id} onClick={() => onChange({ ...state, style: s.id })}>
+              <span style={{ fontFamily: `"${s.font}"` }}>{s.name}</span>
+            </Chip>
           ))}
         </div>
       </fieldset>
+      <div>
+        <label htmlFor="size" className="label">글자 크기</label>
+        <input
+          id="size"
+          type="range"
+          min={0.6}
+          max={1.6}
+          step={0.05}
+          value={state.scale}
+          onChange={(e) => onChange({ ...state, scale: Number(e.target.value) })}
+          className="w-full accent-ink"
+        />
+      </div>
+      <button type="button" className="btn-line" onClick={onReset}>
+        <Undo2 aria-hidden className="size-5" /> 처음 이미지로 돌아가기
+      </button>
     </section>
   );
 }

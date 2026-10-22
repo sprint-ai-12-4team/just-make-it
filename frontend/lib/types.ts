@@ -73,14 +73,8 @@ export const PURPOSES: { id: Purpose; title: string; desc: string }[] = [
 
 export const STYLES = ["밝고 경쾌한", "고급스러운", "따뜻한", "심플한", "강렬한"];
 
-// 서버로 보내는 칩. "글자 더 크게"는 글자 고치기(size_scale)에서 처리
+// 서버로 보내는 칩. 글자 크기·위치는 글자 직접 고치기(canvas)에서 처리
 export const ADJUSTMENTS = ["더 밝게", "배경 단순하게", "텍스트 짧게"];
-
-export const POSITIONS: [TextPosition, string][] = [["top", "위"], ["middle", "가운데"], ["bottom", "아래"]];
-export const FONTS: [FontId, string][] = [
-  ["jua", "주아"], ["yeonsung", "연성"], ["batang", "고운바탕"], ["dodum", "고운돋움"], ["blackhan", "검은고딕"],
-];
-export const BIG_TEXT = 1.25;
 
 export const SIZES: Record<Purpose, [number, number]> = {
   instagram: [1024, 1024],

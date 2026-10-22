@@ -1,5 +1,5 @@
 // ponytail: 서빙(API)이 생기기 전 화면 개발용 가짜 응답. NEXT_PUBLIC_MOCK=1일 때만 사용. 서빙 연결 후 파일째 삭제
-import { SIZES, type DetailInput, type DetailPage, type GenerateInput, type Generation, type TextLayout } from "./types";
+import { SIZES, type DetailInput, type DetailPage, type GenerateInput, type Generation } from "./types";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const load = <T>(k: string): T | null => JSON.parse(sessionStorage.getItem(k) ?? "null");
@@ -39,14 +39,6 @@ export const mock = {
     });
     save(`mock_g_${g.id}`, g);
     return g;
-  },
-  async editText(id: string, b: Partial<TextLayout> & { message?: string }) {
-    await wait(300);
-    const g = load<Generation & { hue: number }>(`mock_g_${id}`)!;
-    const { message = g.message, ...layout } = b;
-    const next = fakeAd({ ...g, message, text_layout: { ...g.text_layout!, ...layout } });
-    save(`mock_g_${id}`, next);
-    return next;
   },
   async getGeneration(id: string) {
     const g = load<Generation>(`mock_g_${id}`);
