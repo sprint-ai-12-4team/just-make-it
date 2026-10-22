@@ -1,17 +1,13 @@
 "use client";
 
-import { AdPreview } from "@/components/AdPreview";
 import { Shell } from "@/components/Shell";
 import { Chip, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
-import { save, type Layout, type Pos } from "@/lib/draw";
-import { ADJUSTMENTS, type Generation } from "@/lib/types";
+import { ADJUSTMENTS, BIG_TEXT, FONTS, POSITIONS, type Generation, type TextLayout } from "@/lib/types";
 import { Check, Download, Link2, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-
-const POSITIONS: [Pos, string][] = [["top", "위"], ["middle", "가운데"], ["bottom", "아래"]];
+import { useEffect, useState } from "react";
 
 export default function Page() {
   return (
@@ -24,11 +20,9 @@ export default function Page() {
 function ResultPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [g, setG] = useState<Generation | null>(null);
   const [title, setTitle] = useState("");
-  const [sub, setSub] = useState("");
-  const [layout, setLayout] = useState<Layout>({ pos: "bottom", big: false });
+  const [editing, setEditing] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -40,10 +34,24 @@ function ResultPage() {
       .then((r) => {
         setG(r);
         setTitle(r.message);
-        setSub(r.input?.product_name ?? "");
       })
       .catch((e) => setError(e.message));
   }, [id]);
+
+  /** 서버가 글자 없는 원본에 다시 얹음 (재생성 아님, 1초 이내) */
+  async function editText(b: Partial<TextLayout> & { message?: string }) {
+    setEditing(true);
+    setError("");
+    try {
+      const next = await api.editText(id, b);
+      setG(next);
+      setTitle(next.message);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setEditing(false);
+    }
+  }
 
   async function remake(adjustments: string[]) {
     if (!g?.input) return;
@@ -77,12 +85,16 @@ function ResultPage() {
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
-      <AdPreview canvasRef={canvasRef} width={g.width} layout={layout} panels={[{ src: g.image_url, title, sub }]} />
+      <div className="overflow-hidden rounded-card bg-mist shadow-sm" aria-busy={editing}>
+        {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
+        <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className={`block h-auto w-full transition-opacity ${editing ? "opacity-60" : ""}`} />
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <button type="button" className="btn-fill" onClick={() => save(canvasRef.current, `광고-${title.slice(0, 10)}.png`, setError)}>
+        {/* 프록시 덕분에 같은 출처라 download 속성이 동작 */}
+        <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
           <Download aria-hidden className="size-5" /> 내 기기에 저장
-        </button>
+        </a>
         <button type="button" className="btn-line" onClick={copyLink} aria-live="polite">
           {copied ? <Check aria-hidden className="size-5" /> : <Link2 aria-hidden className="size-5" />}
           {copied ? "링크를 복사했어요" : "링크 복사"}
@@ -91,27 +103,10 @@ function ResultPage() {
 
       {error && <Notice>{error}</Notice>}
 
-      <section className="card flex flex-col gap-6">
-        <h2 className="text-h-sm font-bold">글자 고치기</h2>
-        <p className="-mt-4 hint">바로 위 이미지에 반영돼요. 다시 만들 필요 없어요.</p>
-        <div>
-          <label htmlFor="t" className="label">큰 글자</label>
-          <textarea id="t" rows={2} className="field" value={title} onChange={(e) => setTitle(e.target.value)} />
-        </div>
-        <div>
-          <label htmlFor="s" className="label">작은 글자</label>
-          <input id="s" className="field" value={sub} onChange={(e) => setSub(e.target.value)} />
-        </div>
-        <fieldset>
-          <legend className="label">글자 위치</legend>
-          <div className="flex flex-wrap gap-2">
-            {POSITIONS.map(([v, t]) => (
-              <Chip key={v} on={layout.pos === v} onClick={() => setLayout({ ...layout, pos: v })}>{t}</Chip>
-            ))}
-            <Chip on={layout.big} onClick={() => setLayout({ ...layout, big: !layout.big })}>글자 더 크게</Chip>
-          </div>
-        </fieldset>
-      </section>
+      {/* text_layout이 없으면 서빙이 아직 글자 고치기를 지원하지 않는 응답 (api_spec 10-22 결정 이전) */}
+      {g.text_layout && (
+        <TextEditor layout={g.text_layout} message={g.message} title={title} setTitle={setTitle} busy={editing} onEdit={editText} />
+      )}
 
       <section className="card flex flex-col gap-6">
         <h2 className="text-h-sm font-bold">그림이 마음에 안 드세요?</h2>
@@ -135,5 +130,54 @@ function ResultPage() {
 
       <Link href="/" className="btn-line">처음부터 새로 만들기</Link>
     </div>
+  );
+}
+
+interface EditorProps {
+  layout: TextLayout;
+  message: string;
+  title: string;
+  setTitle: (v: string) => void;
+  busy: boolean;
+  onEdit: (b: Partial<TextLayout> & { message?: string }) => void;
+}
+
+/** 문구는 버튼으로, 위치·글꼴·크기는 누르는 즉시 서버에 반영 */
+function TextEditor({ layout, message, title, setTitle, busy, onEdit }: EditorProps) {
+  const big = layout.size_scale >= BIG_TEXT;
+  return (
+    <section className="card flex flex-col gap-6">
+      <h2 className="text-h-sm font-bold">글자 고치기</h2>
+      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요.</p>
+      <div>
+        <label htmlFor="t" className="label">문구</label>
+        <textarea id="t" rows={2} className="field" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <button
+          type="button"
+          className="btn-line mt-3"
+          disabled={busy || !title.trim() || title.trim() === message}
+          onClick={() => onEdit({ message: title.trim() })}
+        >
+          문구 바꾸기
+        </button>
+      </div>
+      <fieldset disabled={busy}>
+        <legend className="label">글자 위치</legend>
+        <div className="flex flex-wrap gap-2">
+          {POSITIONS.map(([v, t]) => (
+            <Chip key={v} on={layout.position === v} onClick={() => onEdit({ position: v })}>{t}</Chip>
+          ))}
+          <Chip on={big} onClick={() => onEdit({ size_scale: big ? 1 : BIG_TEXT })}>글자 더 크게</Chip>
+        </div>
+      </fieldset>
+      <fieldset disabled={busy}>
+        <legend className="label">글꼴</legend>
+        <div className="flex flex-wrap gap-2">
+          {FONTS.map(([v, t]) => (
+            <Chip key={v} on={layout.font === v} onClick={() => onEdit({ font: v })}>{t}</Chip>
+          ))}
+        </div>
+      </fieldset>
+    </section>
   );
 }

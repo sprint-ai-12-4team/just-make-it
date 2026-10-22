@@ -9,6 +9,7 @@
 
 import io
 import math
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
@@ -22,8 +23,54 @@ FONTS = {
     "dodum": FONT_DIR / "GowunDodum.woff",
     "blackhan": FONT_DIR / "BlackHanSans.woff",
 }
-# 다른 글꼴에 없는 글자가 문구에 있으면 이 글꼴로 대신 씀
-FALLBACK_FONT = FONT_DIR / "GowunDodum.woff"
+# 다른 글꼴에 없는 글자가 문구에 있으면 이 글꼴로 대신 씀 (한글 전체를 가진 글꼴)
+FALLBACK_FONT = "dodum"
+
+# 문구를 놓을 수 있는 위치와 각 위치의 세로 범위 (이미지 높이 비율)
+POSITIONS = {
+    "top": (0.03, 0.38),
+    "middle": (0.32, 0.68),
+    "bottom": (0.62, 0.97),
+}
+SIZE_SCALE_RANGE = (0.6, 1.6)
+
+
+@dataclass
+class TextPlacement:
+    """문구를 어디에, 어떤 글꼴과 크기로 놓았는지.
+
+    Args:
+        position: 위치 (top, middle, bottom)
+        font: 실제로 쓴 글꼴 키 (jua, yeonsung, batang, dodum, blackhan)
+        size_scale: 글자 크기 배율
+        x: 문구 레이어 왼쪽 위 가로 위치(px)
+        y: 문구 레이어 왼쪽 위 세로 위치(px)
+        width: 문구 레이어 가로 크기(px). 테두리, 그림자, 장식 포함
+        height: 문구 레이어 세로 크기(px). 테두리, 그림자, 장식 포함
+    """
+
+    position: str
+    font: str
+    size_scale: float
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @property
+    def layout(self):
+        """API 스펙의 text_layout 형식."""
+        return {
+            "position": self.position,
+            "font": self.font,
+            "size_scale": self.size_scale,
+        }
+
+    @property
+    def box(self):
+        """문구 레이어 위치와 크기 (x, y, 가로, 세로)."""
+        return (self.x, self.y, self.width, self.height)
+
 
 DESIGNS = {
     "밝고 경쾌한": {
@@ -105,17 +152,37 @@ DESIGNS = {
 DEFAULT_DESIGN = "밝고 경쾌한"
 
 
+def text_area(position, width, height):
+    """위치 이름에 해당하는 영역 (왼쪽, 위, 오른쪽, 아래)."""
+    top, bottom = POSITIONS[position]
+    return (0, int(height * top), width, int(height * bottom))
+
+
 def calm_area(image):
-    """위쪽과 아래쪽 중 물체가 적은 영역을 고릅니다. 위쪽을 조금 우대합니다."""
+    """위쪽과 아래쪽 중 물체가 적은 쪽 이름(top 또는 bottom)을 고릅니다. 위쪽을 조금 우대합니다."""
     width, height = image.size
     edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
-    areas = {
-        "top": (0, int(height * 0.03), width, int(height * 0.38)),
-        "bottom": (0, int(height * 0.62), width, int(height * 0.97)),
+    busy = {
+        name: ImageStat.Stat(edges.crop(text_area(name, width, height))).mean[0]
+        for name in ("top", "bottom")
     }
-    busy = {k: ImageStat.Stat(edges.crop(box)).mean[0] for k, box in areas.items()}
     busy["top"] *= 0.85
-    return areas[min(busy, key=busy.get)]
+    return min(busy, key=busy.get)
+
+
+def check_layout(position=None, font=None, size_scale=1.0):
+    """위치, 글꼴, 크기 값이 맞는지 확인합니다.
+
+    Raises:
+        ValueError: 없는 위치나 글꼴이거나 크기 배율이 범위를 벗어났을 때
+    """
+    if position is not None and position not in POSITIONS:
+        raise ValueError(f"position은 {list(POSITIONS)} 중 하나여야 합니다.")
+    if font is not None and font not in FONTS:
+        raise ValueError(f"font는 {list(FONTS)} 중 하나여야 합니다.")
+    low, high = SIZE_SCALE_RANGE
+    if not low <= size_scale <= high:
+        raise ValueError(f"size_scale은 {low}~{high} 사이여야 합니다.")
 
 
 def line_width(text, font, tracking):
@@ -185,24 +252,47 @@ def has_all_glyphs(font_path, text):
     return all(ord(ch) in glyphs for ch in text if not ch.isspace())
 
 
-def render_text(image_bytes, text, mood=None, size_scale=1.0):
-    """분위기에 맞는 디자인으로 문구를 이미지 빈 곳에 얹습니다.
+def design_text(
+    text,
+    mood=None,
+    size=(1024, 1024),
+    size_scale=1.0,
+    image=None,
+    position=None,
+    font=None,
+):
+    """분위기에 맞는 디자인으로 문구만 그린 투명 레이어를 만듭니다.
+
+    색, 테두리, 장식, 기울기는 분위기(mood)를 따르고, 글꼴만 font로 바꿀 수 있습니다.
+    이미지가 있으면 배경 밝기를 보고 글자색을 정하고, 위치를 비우면 물체가 적은 쪽(top, bottom)을 고릅니다.
+    이미지가 없으면(텍스트만 받을 때) 사진 위에서 잘 보이는 밝은 글자로 그리고, 위치를 비우면 top에 놓습니다.
 
     Args:
-        image_bytes: 글자 없는 원본 이미지 바이트
-        text: 얹을 문구
+        text: 그릴 문구
         mood: 분위기 칩 값 (밝고 경쾌한, 따뜻한, 고급스러운, 심플한, 강렬한). 없으면 밝고 경쾌한
-        size_scale: 글자 크기 배율. 글자 더 크게 칩을 누르면 1.25
+        size: 문구를 놓을 이미지 크기 (가로, 세로). 글자 크기를 이 크기에 맞춰 정함
+        size_scale: 글자 크기 배율 (0.6~1.6). 글자 더 크게 칩을 누르면 1.25
+        image: 문구를 놓을 RGBA 이미지. 없으면 None
+        position: 위치 (top, middle, bottom). 비우면 자동
+        font: 글꼴 키 (jua, yeonsung, batang, dodum, blackhan). 비우면 분위기 글꼴
 
     Returns:
-        bytes: 문구를 얹은 PNG 이미지 바이트
+        tuple: (글자 부분만 잘라낸 투명 RGBA 레이어, TextPlacement)
+
+    Raises:
+        ValueError: 위치, 글꼴, 크기 배율 값이 잘못됐을 때
     """
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    width, height = image.size
+    check_layout(position, font, size_scale)
+    width, height = size
     d = DESIGNS.get(mood, DESIGNS[DEFAULT_DESIGN])
-    box = calm_area(image)
-    brightness = ImageStat.Stat(image.convert("L").crop(box)).mean[0]
-    dark_bg = brightness < 150
+    if position is None:
+        position = calm_area(image) if image is not None else "top"
+    box = text_area(position, width, height)
+    if image is not None:
+        brightness = ImageStat.Stat(image.convert("L").crop(box)).mean[0]
+        dark_bg = brightness < 150
+    else:
+        dark_bg = True
 
     fill = d["fill"]
     if fill == "auto":
@@ -214,10 +304,10 @@ def render_text(image_bytes, text, mood=None, size_scale=1.0):
     if d["fill"] in ("auto", "gold") and not dark_bg:
         shadow_color = (255, 255, 255, 150)
 
-    font_path = FONTS[d["font"]]
-    if not font_path.exists() or not has_all_glyphs(font_path, text):
-        font_path = FALLBACK_FONT
-    font_path = str(font_path)
+    font_key = font or d["font"]
+    if not FONTS[font_key].exists() or not has_all_glyphs(FONTS[font_key], text):
+        font_key = FALLBACK_FONT
+    font_path = str(FONTS[font_key])
 
     size = int(width * d["size"] * size_scale)
     while True:
@@ -358,6 +448,7 @@ def render_text(image_bytes, text, mood=None, size_scale=1.0):
         layer = layer.rotate(d["rotate"], resample=Image.BICUBIC, expand=True)
 
     max_w = int(width * 0.96)
+    ratio = 1.0
     if layer.width > max_w:
         ratio = max_w / layer.width
         layer = layer.resize((max_w, int(layer.height * ratio)), Image.LANCZOS)
@@ -366,8 +457,96 @@ def render_text(image_bytes, text, mood=None, size_scale=1.0):
     y = int(cy - layer.height / 2)
     x = max(-pad // 2, min(x, width - layer.width + pad // 2))
     y = max(-pad // 2, min(y, height - layer.height + pad // 2))
-    image.alpha_composite(layer, (x, y))
 
+    # 레이어에 남은 투명 여백을 잘라서, 웹에서 옮길 때 글자 영역만 잡히게 함
+    bbox = layer.getchannel("A").getbbox()
+    if bbox:
+        layer = layer.crop(bbox)
+        x, y = x + bbox[0], y + bbox[1]
+    placement = TextPlacement(
+        position=position,
+        font=font_key,
+        size_scale=size_scale,
+        x=x,
+        y=y,
+        width=layer.width,
+        height=layer.height,
+    )
+    return layer, placement
+
+
+def render_text_layer(
+    text, mood=None, size=(1024, 1024), size_scale=1.0, position=None, font=None
+):
+    """이미지 없이 문구 레이어만 PNG로 만듭니다. (텍스트만 받을 때)
+
+    Returns:
+        tuple: (투명 배경 PNG 바이트, TextPlacement)
+    """
+    layer, placement = design_text(
+        text, mood, size, size_scale, position=position, font=font
+    )
+    return _to_png_bytes(layer), placement
+
+
+def place_text(image_bytes, text, mood=None, size_scale=1.0, position=None, font=None):
+    """문구를 얹지 않고, 이 이미지라면 어디에 어떤 글꼴로 놓을지만 계산합니다. (이미지만 받을 때)
+
+    Returns:
+        TextPlacement: 추천 위치와 글꼴
+    """
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    return design_text(
+        text, mood, image.size, size_scale, image, position=position, font=font
+    )[1]
+
+
+def overlay_text(
+    image_bytes, text, mood=None, size_scale=1.0, position=None, font=None
+):
+    """문구를 이미지에 얹고, 얹은 이미지와 문구 레이어를 같이 돌려줍니다.
+
+    Returns:
+        tuple: (문구를 얹은 PNG 바이트, 문구 레이어 PNG 바이트, TextPlacement)
+    """
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    layer, placement = design_text(
+        text, mood, image.size, size_scale, image, position=position, font=font
+    )
+    canvas = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    canvas.paste(layer, (placement.x, placement.y))
+    combined = Image.alpha_composite(image, canvas).convert("RGB")
+    return _to_png_bytes(combined), _to_png_bytes(layer), placement
+
+
+def render_text(image_bytes, text, mood=None, size_scale=1.0, position=None, font=None):
+    """글자 없는 이미지에 문구를 얹습니다. 결과 화면의 글자 고치기도 이 함수를 씁니다.
+
+    이미지는 다시 만들지 않고 문구, 위치, 글꼴, 크기만 바꿔 얹습니다.
+    색, 테두리, 장식은 분위기(mood)를 그대로 따릅니다.
+
+    Args:
+        image_bytes: 글자 없는 원본 이미지 바이트 (결과의 background_bytes)
+        text: 얹을 문구
+        mood: 분위기 칩 값. 없으면 밝고 경쾌한
+        size_scale: 글자 크기 배율 (0.6~1.6)
+        position: 위치 (top, middle, bottom). 비우면 물체가 적은 쪽(top, bottom)을 자동으로 고름
+        font: 글꼴 키 (jua, yeonsung, batang, dodum, blackhan). 비우면 분위기 글꼴
+
+    Returns:
+        tuple: (문구를 얹은 PNG 바이트, text_layout {"position", "font", "size_scale"})
+            font는 실제로 쓴 글꼴. 글꼴에 없는 글자가 있으면 dodum
+
+    Raises:
+        ValueError: 위치, 글꼴, 크기 배율 값이 잘못됐을 때
+    """
+    combined, _, placement = overlay_text(
+        image_bytes, text, mood, size_scale, position, font
+    )
+    return combined, placement.layout
+
+
+def _to_png_bytes(image):
     buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, format="PNG")
+    image.save(buffer, format="PNG")
     return buffer.getvalue()

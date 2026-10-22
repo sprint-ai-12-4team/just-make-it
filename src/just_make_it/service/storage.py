@@ -30,5 +30,13 @@ def save(name: str, data: bytes) -> str:
     return name
 
 
+def load(name: str) -> bytes:
+    return (image_dir() / name).read_bytes()
+
+
+def remove(name: str) -> None:
+    (image_dir() / name).unlink(missing_ok=True)
+
+
 def url(name: str | None) -> str | None:
     return f"{PUBLIC_BASE_URL}/images/{name}" if name else None

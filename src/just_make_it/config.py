@@ -13,6 +13,8 @@ load_dotenv()
 GEMMA_MODEL = "gemma4:12b-it-qat"
 LUNA_MODEL = "gpt-5.6-luna"
 KLEIN_MODEL = "black-forest-labs/FLUX.2-klein-4B"
+KLEIN_FP8_REPO = "black-forest-labs/FLUX.2-klein-4b-fp8"
+KLEIN_FP8_FILE = "flux-2-klein-4b-fp8.safetensors"
 FLARE_MODEL = "gpt-image-2.5-flare"
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -28,7 +30,6 @@ GEMMA_KEEP_ALIVE = os.getenv("GEMMA_KEEP_ALIVE", "0")
 
 KLEIN_CPU_OFFLOAD = os.getenv("KLEIN_CPU_OFFLOAD", "false").lower() == "true"
 
-# 100만 토큰당 달러. OpenAI 모델 페이지 가격표 기준 (2026-10 확인)
 FLARE_PRICE_TEXT_INPUT = 5.0
 FLARE_PRICE_IMAGE_INPUT = 8.0
 FLARE_PRICE_OUTPUT = 30.0

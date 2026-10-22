@@ -75,13 +75,15 @@ def run_eval(tag, reference_image=None, image_quality="fast", text_quality="basi
                 message=case["message"],
                 purpose=case["purpose"],
                 style=case["style"] or None,
-                generation_mode=case["generation_mode"],
+                output=case["output"],
                 reference_image=reference_image,
                 image_quality=image_quality,
                 text_quality=text_quality,
             )
             image_name = f"{case['case_id']}.png"
-            (image_dir / image_name).write_bytes(result.image_bytes)
+            (image_dir / image_name).write_bytes(
+                result.image_bytes or result.text_layer_bytes
+            )
             row.update(
                 model=result.image_model,
                 fallback_reason=result.image_fallback_reason,
