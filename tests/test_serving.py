@@ -18,8 +18,13 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from just_make_it import config
-from just_make_it.core import registry
-from just_make_it.core.base import BaseImageModel, ImageResult
+from just_make_it.core import ai_models
+from just_make_it.core.base import (
+    ImageGenerationError,
+    ImageResult,
+    TextGenerationError,
+    TextResult,
+)
 from just_make_it.serving.copywriter import CopyInputError, CopyWriter
 from just_make_it.serving.generators import (
     CoreGenerator,
@@ -65,7 +70,8 @@ class FakeCopyWriter(CopyWriter):
         self.error = error
         self.delay = delay
 
-    def suggest(self, product_name, message, style):
+    def suggest(self, product_name, message, style, text_quality="basic"):
+        self.text_quality = text_quality
         if self.delay:
             time.sleep(self.delay)
         if self.error:
@@ -88,18 +94,40 @@ def noise_png(size=(200, 200)) -> bytes:
     return buffer.getvalue()
 
 
-class FakeCoreModel(BaseImageModel):
-    """core registry에 끼워 넣는 가짜 이미지 모델 (실제 PNG를 돌려줌)."""
+class FakeText:
+    """core V1에 끼워 넣는 가짜 텍스트 모델 (Gemma·luna 자리)."""
 
-    name = "fake"
-    calls: list[dict] = []
+    def __init__(self, name, fail=False, cost=0.0):
+        self.name, self.fail, self.cost = name, fail, cost
+        self.calls = 0
 
-    def generate(self, prompt, width, height, reference_image=None, **options):
-        FakeCoreModel.calls.append(
-            {"prompt": prompt, "width": width, "height": height, "ref": reference_image}
+    def generate(self, instructions, user_input, max_tokens=300):
+        self.calls += 1
+        if self.fail:
+            raise TextGenerationError("Ollama 연결 실패")
+        text = "PRODUCT: a golden roll\nSCENE: warm morning light on a wooden table"
+        return TextResult(
+            text=text, model=self.name, elapsed_sec=0.0, cost_usd=self.cost
         )
+
+
+class FakeImage:
+    """core V1에 끼워 넣는 가짜 이미지 모델 (klein·flare 자리). 실제 PNG를 돌려준다."""
+
+    def __init__(self, name, fail=False, cost=0.0):
+        self.name, self.fail, self.cost = name, fail, cost
+        self.calls: list[dict] = []
+
+    def generate(self, prompt, width, height, reference_image=None, seed=None):
+        self.calls.append({"prompt": prompt, "ref": reference_image, "seed": seed})
+        if self.fail:
+            raise ImageGenerationError("GPU 메모리 부족")
         return ImageResult(
-            image_bytes=png_bytes((width, height)), model="fake-model", elapsed_sec=0.01
+            image_bytes=png_bytes((width, height)),
+            model=self.name,
+            elapsed_sec=0.01,
+            cost_usd=self.cost,
+            seed=None if self.cost else 7,
         )
 
 
@@ -116,11 +144,26 @@ def isolate_env(monkeypatch):
 
 @pytest.fixture
 def fake_core(monkeypatch):
-    FakeCoreModel.calls = []
-    monkeypatch.setitem(registry.IMAGE_MODELS, "fake", FakeCoreModel)
-    registry.clear_loaded_models()
-    yield FakeCoreModel
-    registry.clear_loaded_models()
+    """core V1의 모델 4개를 가짜로 바꾼다 (API 비용·GPU 없이 실행)."""
+    models = {
+        "gemma": FakeText("gemma4:12b-it-qat"),
+        "luna": FakeText("gpt-5.6-luna", cost=0.0004),
+        "klein": FakeImage("FLUX.2 [klein] 4B"),
+        "flare": FakeImage(config.FLARE_MODEL, cost=0.0136),
+    }
+    for key, model in models.items():
+        monkeypatch.setattr(ai_models, f"get_{key}", lambda m=model: m)
+    monkeypatch.setattr(config, "USE_FALLBACK", True)
+    return models
+
+
+def unloadable(name):
+    """불러오기에 실패하는 모델 (GPU 없음 등)."""
+
+    def get():
+        raise ImageGenerationError(f"{name} 불러오기 실패: GPU를 찾을 수 없습니다.")
+
+    return get
 
 
 def make_client(
@@ -128,9 +171,12 @@ def make_client(
 ):
     settings = ServingSettings(
         _env_file=None,
-        data_dir=tmp_path,
-        generate_wait_seconds=5.0,
-        **overrides,
+        **{
+            "data_dir": tmp_path,
+            "generate_wait_seconds": 5.0,
+            "load_models_in_background": False,
+            **overrides,
+        },
     )
     primary = primary or MockGenerator(0.01)
     app = create_app(
@@ -492,17 +538,51 @@ def test_extra_daily_limit_stops_fallback(tmp_path):
     assert health["extra_calls_today"] == 1
 
 
-def test_premium_route(tmp_path):
+def test_detailed_image_model_uses_premium_route(tmp_path):
+    # "더 정교하게"(OpenAI)는 로컬 대기열을 거치지 않는다
+    primary = RecordingMock(0.01)
+    premium = RecordingMock(0.01, name="premium")
+    with make_client(tmp_path, primary=primary, premium=premium) as client:
+        body = client.post(
+            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.5-flare"}
+        ).json()
+    assert route_of(tmp_path, body["id"]) == "premium"
+    assert len(premium.specs) == 1 and primary.specs == []
+
+
+def test_fast_image_model_uses_primary_route(tmp_path):
     premium = RecordingMock(0.01, name="premium")
     with make_client(tmp_path, premium=premium) as client:
-        body = client.post("/generate", json={**BASE_BODY, "premium": True}).json()
-    assert route_of(tmp_path, body["id"]) == "premium"
-    assert len(premium.specs) == 1
+        body = client.post(
+            "/generate", json={**BASE_BODY, "image_model": "flux2-klein-4b"}
+        ).json()
+    assert route_of(tmp_path, body["id"]) == "primary"
+    assert premium.specs == []
 
 
-def test_premium_without_premium_model_uses_primary(tmp_path):
+def test_unknown_image_model_returns_422(tmp_path):
     with make_client(tmp_path) as client:
-        body = client.post("/generate", json={**BASE_BODY, "premium": True}).json()
+        res = client.post("/generate", json={**BASE_BODY, "image_model": "sdxl"})
+    assert res.status_code == 422
+
+
+def test_text_model_maps_to_text_quality(tmp_path):
+    primary = RecordingMock(0.01)
+    with make_client(
+        tmp_path, primary=primary, generate_text_quality="basic"
+    ) as client:
+        client.post("/generate", json=BASE_BODY)
+        client.post(
+            "/generate", json={**BASE_BODY, "text_model": "openai-gpt-5.6-luna"}
+        )
+    assert [s.text_quality for s in primary.specs] == ["basic", "natural"]
+
+
+def test_detailed_without_api_model_uses_primary(tmp_path):
+    with make_client(tmp_path) as client:
+        body = client.post(
+            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.5-flare"}
+        ).json()
     assert route_of(tmp_path, body["id"]) == "primary"
 
 
@@ -564,6 +644,20 @@ def test_copies_returns_at_most_three(tmp_path):
     assert res.json() == {"copies": ["문구1", "문구2", "문구3"]}
 
 
+def test_copies_text_model_maps_to_text_quality(tmp_path):
+    writer = FakeCopyWriter()
+    with make_client(tmp_path, copywriter=writer) as client:
+        client.post(
+            "/copies",
+            json={
+                "product_name": "꽃집",
+                "message": "할인",
+                "text_model": "openai-gpt-5.6-luna",
+            },
+        )
+    assert writer.text_quality == "natural"
+
+
 def test_copies_missing_required_returns_400(tmp_path):
     with make_client(tmp_path) as client:
         res = client.post("/copies", json={"product_name": "꽃집", "message": " "})
@@ -592,8 +686,19 @@ def test_copies_timeout_returns_503(tmp_path):
 
 
 # ---------------------------------------------------------------------- core 연동
-def test_core_generator_end_to_end(tmp_path, fake_core):
-    with make_client(tmp_path, primary=CoreGenerator("fake")) as client:
+def core_client(tmp_path, **overrides):
+    """실제 서빙 구성(기본 = klein, 우회·선택 = flare)에 가짜 모델을 끼운 클라이언트."""
+    return make_client(
+        tmp_path,
+        primary=CoreGenerator("fast"),
+        fallback=CoreGenerator("detailed"),
+        premium=CoreGenerator("detailed"),
+        **overrides,
+    )
+
+
+def test_core_fast_end_to_end(tmp_path, fake_core):
+    with core_client(tmp_path) as client:
         res = client.post(
             "/generate",
             data={**BASE_BODY, "purpose": "youtube", "adjustments": "더 밝게"},
@@ -602,45 +707,104 @@ def test_core_generator_end_to_end(tmp_path, fake_core):
         body = res.json()
         image = fetch_image(client, body["image_url"])
     assert res.status_code == 200, res.text
-    assert body["source"] == "local"
+    assert body["source"] == "local"  # klein
     assert (body["width"], body["height"]) == (1536, 864)  # 스펙 5장 youtube
-    call = fake_core.calls[0]
+    call = fake_core["klein"].calls[0]
     assert call["ref"] is not None
     assert "brighter" in call["prompt"]  # core가 수정 칩을 프롬프트에 반영
-    # 글자는 프론트가 얹으므로 이미지 프롬프트에 문구를 그리라는 지시가 없어야 한다
-    assert "Include this Korean headline" not in call["prompt"]
+    assert fake_core["flare"].calls == []
     assert image.size == (1536, 864)
+    row = db_rows(tmp_path)[0]
+    assert row["route"] == "primary" and row["seed"] == 7 and row["cost_usd"] == 0
+    params = json.loads(row["params_json"])
+    assert (
+        params["image_quality"] == "fast"
+        and params["text_model"] == "gemma4:12b-it-qat"
+    )
+
+
+def test_core_saves_text_free_background(tmp_path, fake_core, monkeypatch):
+    # 글자는 프론트가 얹으므로 core가 글자를 그리면 안 된다 (canvas 모드)
+    from just_make_it.core import pipeline
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("서버에서 글자를 얹으면 안 된다")
+
+    monkeypatch.setattr(pipeline, "render_text", fail_if_called)
+    with core_client(tmp_path) as client:
+        res = client.post("/generate", json=BASE_BODY)
+    assert res.status_code == 200, res.text
+
+
+def test_core_detailed_records_openai_cost(tmp_path, fake_core):
+    with core_client(tmp_path) as client:
+        body = client.post(
+            "/generate",
+            json={
+                **BASE_BODY,
+                "image_model": "openai-image-2.5-flare",
+                "text_model": "openai-gpt-5.6-luna",
+            },
+        ).json()
+    assert body["source"] == "openai"
+    assert fake_core["klein"].calls == [] and fake_core["gemma"].calls == 0
+    row = db_rows(tmp_path)[0]
+    assert row["route"] == "premium" and row["model"] == config.FLARE_MODEL
+    assert row["cost_usd"] == pytest.approx(0.0136 + 0.0004)
+
+
+def test_core_internal_fallback_is_recorded(tmp_path, fake_core):
+    # klein이 생성 중 실패하면 core가 flare로 넘긴다 → 경로는 fallback으로 기록
+    fake_core["klein"].fail = True
+    fake_core["gemma"].fail = True
+    with core_client(tmp_path) as client:
+        body = client.post("/generate", json=BASE_BODY).json()
+    assert body["status"] == "success" and body["source"] == "openai"
+    row = db_rows(tmp_path)[0]
+    assert row["route"] == "fallback"
+    params = json.loads(row["params_json"])
+    assert "klein" in params["fallback_reason"]
+    assert params["text_model"] == "gpt-5.6-luna"  # Gemma 실패 → luna
+
+
+def test_klein_unloadable_falls_back_without_retrying(tmp_path, fake_core, monkeypatch):
+    # GPU가 없어 klein을 못 불러오면 기본 경로는 준비 안 됨 → 처음부터 flare로
+    monkeypatch.setattr(ai_models, "get_klein", unloadable("klein"))
+    with core_client(tmp_path) as client:
+        health = client.get("/health").json()
+        body = client.post("/generate", json=BASE_BODY).json()
+    assert health["status"] == "degraded" and health["primary_ready"] is False
+    assert body["source"] == "openai"
+    assert route_of(tmp_path, body["id"]) == "fallback"
+
+
+def test_models_load_in_background(tmp_path, fake_core):
+    with core_client(tmp_path, load_models_in_background=True) as client:
+        deadline = time.monotonic() + 5
+        while client.get("/health").json()["models_loading"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert client.get("/health").json()["primary_ready"] is True
 
 
 def test_core_input_error_is_not_retryable(fake_core):
-    generator = CoreGenerator("fake")
+    generator = CoreGenerator("fast")
     generator.load()
     with pytest.raises(GeneratorError) as info:
         generator.generate(GenerationSpec(product_name="  ", message="신메뉴"))
     assert info.value.retryable is False
 
 
-def test_unknown_core_model_is_not_ready_and_falls_back(tmp_path):
-    with make_client(
-        tmp_path,
-        primary=CoreGenerator("no-such-model"),
-        fallback=MockGenerator(0.01, name="fb"),
-    ) as client:
-        health = client.get("/health").json()
-        body = client.post("/generate", json=BASE_BODY).json()
-    assert health["status"] == "degraded"
-    assert route_of(tmp_path, body["id"]) == "fallback"
-
-
-def test_app_starts_without_api_key(tmp_path, monkeypatch):
-    # 배포 환경에서 키가 빠져도 서버는 떠야 한다 (헬스체크로 원인 확인)
+def test_app_starts_without_api_key_or_gpu(tmp_path, monkeypatch):
+    # 배포 환경에서 키·GPU가 없어도 서버는 떠야 한다 (헬스체크로 원인 확인)
     monkeypatch.setattr(config, "OPENAI_API_KEY", "")
-    registry.clear_loaded_models()
+    monkeypatch.setattr(ai_models, "get_klein", unloadable("klein"))
+    ai_models.clear_models()
     settings = ServingSettings(_env_file=None, data_dir=tmp_path)
     with TestClient(create_app(settings=settings)) as client:
         health = client.get("/health")
         res = client.post("/generate", json=BASE_BODY)
-    registry.clear_loaded_models()
+    ai_models.clear_models()
     assert health.status_code == 200
     assert health.json()["primary_ready"] is False
     assert res.status_code == 503

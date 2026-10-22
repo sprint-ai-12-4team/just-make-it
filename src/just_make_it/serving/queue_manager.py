@@ -96,6 +96,7 @@ class Job:
     error_internal: str | None = None
     input_error: bool = False
     fallback_reason: str | None = None
+    cost_usd: float | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
@@ -171,18 +172,22 @@ class QueueManager:
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._running: set[str] = set()
         self._workers: list[asyncio.Task] = []
+        self._loading: asyncio.Task | None = None
         self._extra_tasks: set[asyncio.Task] = set()
         self._extra_slots = asyncio.Semaphore(EXTRA_CONCURRENCY)
 
     # ------------------------------------------------------------------ 수명 주기
     async def start(self) -> None:
-        for generator in (self.primary, self.fallback, self.premium):
-            if generator is None:
-                continue
-            try:
-                await asyncio.to_thread(generator.load)
-            except Exception:  # 준비 실패해도 서버는 뜨고 다른 경로로 처리
-                logger.exception("생성기 준비 실패: %s", generator.name)
+        # API 모델(Fallback·프리미엄)은 금방 준비되니 먼저 기다리고,
+        # 로컬 모델(klein)은 GPU에 올리는 데 오래 걸려서 설정에 따라 뒤에서 불러온다.
+        # 다 불러오기 전에 들어온 기본 요청은 primary_not_ready로 Fallback 처리된다.
+        for generator in (self.fallback, self.premium):
+            if generator is not None:
+                await self._load(generator)
+        if self.settings.load_models_in_background:
+            self._loading = asyncio.create_task(self._load(self.primary))
+        else:
+            await self._load(self.primary)
         self._workers = [
             asyncio.create_task(self._worker_loop(), name=f"primary-worker-{i}")
             for i in range(self.concurrency)
@@ -198,8 +203,26 @@ class QueueManager:
             self.settings.generation_timeout_seconds,
         )
 
+    async def _load(self, generator: ImageGenerator) -> None:
+        try:
+            await asyncio.to_thread(generator.load)
+        except Exception:  # 준비 실패해도 서버는 뜨고 다른 경로로 처리
+            logger.exception("생성기 준비 실패: %s", generator.name)
+        if generator is self.primary:
+            logger.info(
+                "기본 생성기 준비 %s: %s",
+                "완료" if generator.is_ready else "실패",
+                generator.name,
+            )
+
+    @property
+    def models_loading(self) -> bool:
+        return self._loading is not None and not self._loading.done()
+
     async def stop(self) -> None:
         tasks = [*self._workers, *self._extra_tasks]
+        if self.models_loading:
+            tasks.append(self._loading)  # type: ignore[arg-type]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -407,15 +430,22 @@ class QueueManager:
         self, job: Job, output: GenerationOutput, generator: ImageGenerator
     ) -> None:
         job.finished_mono = time.monotonic()
-        job.source = generator.source
+        job.source = output.source or generator.source
         job.model = output.model
         job.prompt = output.prompt
+        job.cost_usd = output.cost_usd
+        if output.fallback_reason and job.route == "primary":
+            # core가 안에서 로컬 모델 대신 API 모델로 만든 경우 (예: klein 실패 → flare)
+            job.route, job.fallback_reason = "fallback", "core_fallback"
+            logger.info(
+                "core 내부 Fallback: job=%s (%s)", job.id, output.fallback_reason
+            )
         try:
             job.result = await asyncio.to_thread(
                 self.records.finish,
                 job.id,
                 output,
-                source=generator.source,
+                source=job.source,
                 route=job.route,
                 queue_ms=job.queue_ms,
                 image_ms=job.image_ms,
@@ -480,8 +510,7 @@ class QueueManager:
             "error": job.error_internal,
             "queue_ms": job.queue_ms,
             "image_ms": job.image_ms,
-            # TODO: 응답의 토큰 사용량 또는 품질·크기별 단가표로 계산
-            "cost_usd": None,
+            "cost_usd": job.cost_usd,
         }
         generation_log.info(json.dumps(record, ensure_ascii=False))
 

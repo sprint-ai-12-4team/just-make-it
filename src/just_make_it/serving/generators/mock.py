@@ -65,4 +65,6 @@ class MockGenerator(ImageGenerator):
             width=width,
             height=height,
             prompt=f"[mock] {spec.product_name} / {spec.message}",
+            cost_usd=0.0,
+            params={"text_quality": spec.text_quality},
         )

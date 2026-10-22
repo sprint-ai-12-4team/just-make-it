@@ -14,16 +14,33 @@ class CopyInputError(ValueError):
 
 class CopyWriter(ABC):
     @abstractmethod
-    def suggest(self, product_name: str, message: str, style: str | None) -> list[str]:
-        """문구 후보를 최대 3개 돌려준다. 실패 시 CopyInputError 또는 GeneratorError."""
+    def suggest(
+        self,
+        product_name: str,
+        message: str,
+        style: str | None,
+        text_quality: str = "basic",
+    ) -> list[str]:
+        """문구 후보를 최대 3개 돌려준다. 실패 시 CopyInputError 또는 GeneratorError.
+
+        text_quality: basic(로컬 Gemma, 실패하면 core가 luna로 폴백) / natural(luna)
+        """
 
 
 class CoreCopyWriter(CopyWriter):
-    def suggest(self, product_name: str, message: str, style: str | None) -> list[str]:
+    def suggest(
+        self,
+        product_name: str,
+        message: str,
+        style: str | None,
+        text_quality: str = "basic",
+    ) -> list[str]:
         from just_make_it.core import TextGenerationError, suggest_ad_copies
 
         try:
-            return suggest_ad_copies(product_name, message, style=style, n=3)
+            return suggest_ad_copies(
+                product_name, message, style=style, n=3, text_quality=text_quality
+            )
         except ValueError as exc:
             raise CopyInputError(str(exc)) from exc
         except TextGenerationError as exc:
@@ -33,7 +50,13 @@ class CoreCopyWriter(CopyWriter):
 
 
 class MockCopyWriter(CopyWriter):
-    def suggest(self, product_name: str, message: str, style: str | None) -> list[str]:
+    def suggest(
+        self,
+        product_name: str,
+        message: str,
+        style: str | None,
+        text_quality: str = "basic",
+    ) -> list[str]:
         return [
             f"{product_name}, {message}",
             f"지금 {product_name}에서 {message}",

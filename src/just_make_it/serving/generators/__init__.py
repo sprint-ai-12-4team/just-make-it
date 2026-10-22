@@ -27,11 +27,9 @@ def build_generators(settings: ServingSettings) -> Generators:
             MockGenerator(delay, name="mock-premium"),
         )
 
-    def optional(name: str | None) -> CoreGenerator | None:
-        return CoreGenerator(name) if name else None
-
+    # 기본 = 빠르게(로컬 klein). 우회·"더 정교하게" = OpenAI flare
     return (
-        CoreGenerator(settings.primary_image_model),
-        optional(settings.fallback_image_model),
-        optional(settings.premium_image_model),
+        CoreGenerator("fast"),
+        CoreGenerator("detailed") if settings.queue_fallback else None,
+        CoreGenerator("detailed"),
     )

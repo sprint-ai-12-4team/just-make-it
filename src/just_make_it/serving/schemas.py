@@ -14,6 +14,18 @@ Purpose = Literal["instagram", "commerce", "youtube", "kakao", "free"]
 Source = Literal["local", "openai", "mock"]
 # 서버가 고른 경로: primary(기본), fallback(대기·장애 우회), premium(유저 선택). 통계용
 Route = Literal["primary", "fallback", "premium"]
+# 프론트가 고르는 모델 (api_spec 1·3장). 화면에는 "빠르게 / 더 정교하게"로만 보인다
+ImageModel = Literal["flux2-klein-4b", "openai-image-2.5-flare"]
+TextModel = Literal["gemma-4-12b-it", "openai-gpt-5.6-luna"]
+# 프론트 모델 이름 → core 파이프라인 V1의 품질 값
+IMAGE_QUALITY: dict[str, str] = {
+    "flux2-klein-4b": "fast",
+    "openai-image-2.5-flare": "detailed",
+}
+TEXT_QUALITY: dict[str, str] = {
+    "gemma-4-12b-it": "basic",
+    "openai-gpt-5.6-luna": "natural",
+}
 
 
 def _strip_text(value: object) -> object:
@@ -38,8 +50,10 @@ class GenerateRequest(BaseModel):
     adjustments: list[str] = Field(default_factory=list, max_length=10)
     # 다시 만들기·수정할 때 원본 결과의 id
     parent_id: str | None = Field(default=None, max_length=64)
-    # 고품질 모드 (스펙 미결 사항. 서버에 프리미엄 모델이 설정됐을 때만 적용)
-    premium: bool = False
+    # 그림 품질. klein = 빠르게(로컬, 기본), flare = 더 정교하게(OpenAI)
+    image_model: ImageModel = "flux2-klein-4b"
+    # 영어 묘사·"텍스트 짧게"에 쓸 문구 모델. 비우면 서버 설정(GENERATE_TEXT_QUALITY)
+    text_model: TextModel | None = None
 
     _strip = field_validator("product_name", "message", "style", mode="before")(
         _strip_text
@@ -59,6 +73,8 @@ class CopiesRequest(BaseModel):
     product_name: str
     message: str
     style: str | None = None
+    # 문구 품질. gemma = 기본(로컬), luna = 더 자연스럽게(OpenAI)
+    text_model: TextModel = "gemma-4-12b-it"
 
     _strip = field_validator("product_name", "message", "style", mode="before")(
         _strip_text
@@ -121,6 +137,7 @@ class HealthResponse(BaseModel):
     primary_ready: bool
     fallback_model: str | None
     premium_model: str | None
+    models_loading: bool
     queue_length: int
     running: int
     estimated_wait_seconds: float
@@ -141,15 +158,26 @@ class GenerationSpec:
     style: str | None = None
     adjustments: list[str] = field(default_factory=list)
     reference_image: bytes | None = None
+    # core V1 문구 품질 (basic / natural)
+    text_quality: str = "basic"
 
 
 @dataclass
 class GenerationOutput:
     """생성기 결과."""
 
-    image_bytes: bytes  # PNG
+    image_bytes: bytes  # 글자 없는 PNG (문구는 프론트가 얹음)
     message: str
     model: str
     width: int
     height: int
     prompt: str | None = None
+    # 실제로 이미지를 만든 곳. 비우면 생성기 기본값 (core가 내부에서 폴백하면 바뀜)
+    source: Source | None = None
+    # core가 로컬 모델 대신 API 모델을 쓴 이유 (예: klein 실패로 flare 사용)
+    fallback_reason: str = ""
+    cost_usd: float | None = None
+    seed: int | None = None
+    text_ms: int | None = None
+    # DB params_json에 남길 재현·분석용 값 (text_model, product_source 등)
+    params: dict = field(default_factory=dict)

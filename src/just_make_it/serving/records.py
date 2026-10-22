@@ -76,12 +76,16 @@ class GenerationRecords:
             message=output.message,
             width=output.width,
             height=output.height,
+            params={**output.params, "fallback_reason": output.fallback_reason},
             backend=source,
             route=route,
             model=output.model,
             image_prompt=output.prompt,
+            seed=output.seed,
             queue_ms=queue_ms,
+            text_ms=output.text_ms,
             image_ms=image_ms,
+            cost_usd=output.cost_usd,
         )
 
     def fail(self, gid: str, error: str) -> None:

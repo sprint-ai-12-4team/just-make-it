@@ -20,6 +20,8 @@ from .queue_manager import (
 )
 from .records import GenerationRecords
 from .schemas import (
+    IMAGE_QUALITY,
+    TEXT_QUALITY,
     CopiesRequest,
     CopiesResponse,
     GenerateRequest,
@@ -66,6 +68,7 @@ COPIES_EXAMPLE = {
     "product_name": "동네꽃집",
     "message": "주말 20% 할인",
     "style": "밝고 경쾌한",
+    "text_model": "gemma-4-12b-it",
 }
 GENERATE_EXAMPLE = {
     "purpose": "instagram",
@@ -74,6 +77,7 @@ GENERATE_EXAMPLE = {
     "style": "따뜻한",
     "adjustments": [],
     "parent_id": None,
+    "image_model": "flux2-klein-4b",
 }
 
 
@@ -130,6 +134,7 @@ async def health(request: Request) -> HealthResponse:
         primary_ready=manager.primary.is_ready,
         fallback_model=manager.fallback.name if manager.fallback else None,
         premium_model=manager.premium.name if manager.premium else None,
+        models_loading=manager.models_loading,
         queue_length=manager.queue_length,
         running=manager.running_count,
         estimated_wait_seconds=round(manager.estimated_wait_for_new_job(), 1),
@@ -160,6 +165,7 @@ async def copies(request: Request) -> CopiesResponse:
                 payload.product_name,
                 payload.message,
                 payload.style,
+                TEXT_QUALITY[payload.text_model],
             ),
             timeout=settings.copy_timeout_seconds,
         )
@@ -191,7 +197,9 @@ async def generate(
 
     - `application/json`, 참고 사진이 있으면 `multipart/form-data`(`reference_image`)
     - 이미지는 글자 없이 만들고, 응답 `message`를 프론트가 이미지 위에 얹는다
-    - 기본 모델이 밀리면 서버가 Fallback 모델로 넘기므로 프론트는 폴링하지 않는다
+    - `image_model`: `flux2-klein-4b`(빠르게, 로컬 GPU 대기열) /
+      `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
+    - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록). 프론트는 폴링하지 않는다
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
     """
     settings = _settings(request)
@@ -206,13 +214,20 @@ async def generate(
         style=payload.style,
         adjustments=payload.adjustments,
         reference_image=reference,
+        text_quality=(
+            TEXT_QUALITY[payload.text_model]
+            if payload.text_model
+            else settings.generate_text_quality
+        ),
     )
+    # "더 정교하게"(OpenAI)는 로컬 GPU 대기열을 거치지 않는 프리미엄 경로로 보낸다
+    use_api_model = IMAGE_QUALITY[payload.image_model] == "detailed"
 
     manager = _manager(request)
     try:
         job = await manager.submit(
             spec,
-            premium=payload.premium,
+            premium=use_api_model,
             client_id=_client_id(x_client_id),
             parent_id=payload.parent_id,
         )

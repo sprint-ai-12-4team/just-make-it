@@ -18,15 +18,17 @@ class ServingSettings(BaseSettings):
     )
 
     # ----- 생성기 선택 -----
-    # core: core.generate_ad_image 사용 (실제 생성, OPENAI_API_KEY 필요)
+    # core: core 파이프라인 V1 사용 (실제 생성)
     # mock: API 키·GPU 없이 더미 이미지 반환 (프론트·서빙 개발용)
     image_backend: Literal["core", "mock"] = "core"
-    # core registry에 등록된 모델 이름. 비우면 core의 DEFAULT_IMAGE_BACKEND
-    primary_image_model: str | None = None
-    # 대기·장애 시 우회할 모델. 비우면 Fallback 끔
-    fallback_image_model: str | None = None
-    # 유저가 고품질 모드를 고르면 쓸 모델. 비우면 premium 요청도 기본 모델로 처리
-    premium_image_model: str | None = None
+    # 기본 경로("빠르게" = 로컬 klein) 대기가 길거나 준비 안 됐을 때
+    # "더 정교하게"(OpenAI flare)로 넘길지. false면 기다리거나 503
+    queue_fallback: bool = True
+    # /generate 안에서 이미지 프롬프트용 영어 묘사를 만들 텍스트 품질
+    # basic = 로컬 Gemma(실패하면 core가 luna로 폴백), natural = OpenAI luna
+    generate_text_quality: Literal["basic", "natural"] = "basic"
+    # 서버 시작 시 모델(klein)을 뒤에서 불러온다. 다 불러오기 전 요청은 Fallback으로 처리
+    load_models_in_background: bool = True
     mock_delay_seconds: float = 2.0
 
     # ----- 기본 생성기 대기열 -----
@@ -52,13 +54,14 @@ class ServingSettings(BaseSettings):
     # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리
     # (Flare 평균 17~20초, "텍스트 짧게"는 문구 모델 호출까지 포함)
     generation_timeout_seconds: float = 90.0
-    # 문구 추천(/copies) 제한 시간(초)
-    copy_timeout_seconds: float = 30.0
+    # 문구 추천(/copies) 제한 시간(초). Gemma는 호출 때마다 GPU에 올렸다 내려서 여유 있게
+    copy_timeout_seconds: float = 60.0
 
     # ----- 응답 -----
     # /generate는 동기 응답. 대기 + 생성 + Fallback까지 이 시간(초) 안에 안 끝나면 503
     # (작업 자체는 계속 돌고 결과는 DB에 남아 GET /generations/{id}로 볼 수 있음)
-    generate_wait_seconds: float = 180.0
+    # Vercel 프록시가 120초에서 끊으므로 그보다 짧게
+    generate_wait_seconds: float = 110.0
 
     # ----- 입력 제한 -----
     max_upload_bytes: int = 10 * 1024 * 1024
