@@ -4,7 +4,7 @@
 # ============================================================
 
 # ----- Stage 1: Builder (의존성 설치) -----
-FROM python:3.11-slim AS builder
+FROM astral/uv:python3.11-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -14,11 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# uv 설치
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
 # 의존성 파일만 먼저 복사 (레이어 캐시 활용)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 
 # 가상환경 생성 + 의존성 설치 (프로덕션용, dev 의존성 제외)
 ENV UV_COMPILE_BYTECODE=1
@@ -59,7 +56,8 @@ ENV HF_HOME=/app/model-cache
 ENV TRANSFORMERS_CACHE=/app/model-cache
 
 # non-root 유저로 실행
-RUN mkdir -p /app/model-cache && chown -R appuser:appuser /app
+# data: 서비스 DB·생성 이미지 (compose의 service-data 볼륨이 이 소유권을 이어받음)
+RUN mkdir -p /app/model-cache /app/data && chown -R appuser:appuser /app
 USER appuser
 
 # 포트

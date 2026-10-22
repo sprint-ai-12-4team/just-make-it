@@ -1,55 +1,20 @@
 # just-make-it Frontend
 
-소상공인용 AI 광고 이미지 생성 UI (Next.js 15 + TypeScript + Tailwind)
-
-## 페이지 흐름
-
-1. `/` — 목적(매체) 선택
-2. `/create` — 정보 입력 + 생성 방식 + 생성 요청
-3. `/result` — 결과 확인, 다운로드, 링크 복사, 간단 수정
-
-## 실행
+Next.js 15 + TypeScript + Tailwind 3. 디자인 토큰은 루트 `DESIGN.md` (먹색 + 노랑, 다른 색 추가 금지). API 계약은 `docs/api_spec.md`.
 
 ```bash
-cd frontend
-cp .env.example .env.local
-npm install
-npm run dev
+cp .env.example .env.local   # NEXT_PUBLIC_MOCK=1 이면 서버 없이 가짜 응답
+npm install && npm run dev   # http://localhost:3000
+node lib/draw.check.ts       # 문구 줄바꿈 검사
 ```
 
-브라우저: http://localhost:3000
+| 경로 | 화면 |
+|------|------|
+| `/` | ① 어디에 올릴지 고르기 |
+| `/create?purpose=` | ② 이름·하고 싶은 말·문구 추천·느낌·사진 → 생성 |
+| `/result/[id]` | 결과. 글자 고치기(즉시 반영)·저장·링크 복사·다시 만들기 |
+| `/detail/[id]` | 상세페이지 진행(2초 폴링)·섹션 재생성·긴 이미지 한 장 저장 |
 
-백엔드(FastAPI)는 `NEXT_PUBLIC_API_URL`(기본 `http://localhost:8000`)로 호출합니다.  
-백엔드가 없어도 생성 단계에서 **데모 이미지**로 결과 화면까지 진행됩니다.
-
-## 스택
-
-- Next.js 15 (App Router)
-- TypeScript
-- Tailwind CSS
-- lucide-react (아이콘)
-
-## 백엔드 연동
-
-`lib/api.ts`의 `generateImage()`가 `POST /generate`를 호출합니다.  
-API 스펙이 확정되면 필드명만 맞추면 됩니다.
-
-## 폴더 구조
-
-```
-frontend/
-├── app/
-│   ├── page.tsx           # 목적 선택
-│   ├── create/page.tsx    # 입력 + 생성
-│   └── result/page.tsx    # 결과
-├── components/
-│   ├── PurposeSelector.tsx
-│   ├── InfoForm.tsx
-│   ├── GenerationModeSelector.tsx
-│   └── ui/
-├── lib/
-│   ├── api.ts
-│   ├── types.ts
-│   └── utils.ts
-└── package.json
-```
+- 이미지는 글자 없이 생성 → `lib/draw.ts`가 `<canvas>`에 문구를 얹음. 미리보기와 저장이 같은 코드
+- 저장소(`image_url`)에 CORS 허용이 없으면 저장이 실패함
+- `lib/mock.ts`는 서빙 연결 후 삭제

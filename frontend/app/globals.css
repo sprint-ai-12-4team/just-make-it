@@ -6,14 +6,61 @@
   color-scheme: light;
 }
 
-body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+/* #how 같은 같은 페이지 링크를 부드럽게. 움직임 줄이기 설정한 사용자는 제외 */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
-/* 모바일에서 버튼 터치 영역 확보 */
+body {
+  @apply bg-white text-body text-ink antialiased;
+}
+
 @layer base {
   button,
   a {
     -webkit-tap-highlight-color: transparent;
+  }
+  :focus-visible {
+    @apply outline outline-[3px] outline-offset-2 outline-ink;
+  }
+}
+
+/* DESIGN.md 컴포넌트. 버튼은 먹색만 채움, 노랑은 버튼에 쓰지 않음 */
+@layer components {
+  .btn {
+    @apply inline-flex min-h-[52px] items-center justify-center gap-2 rounded-btn px-6 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-fill {
+    @apply btn bg-ink text-white hover:bg-charcoal;
+  }
+  .btn-line {
+    @apply btn border-2 border-ink bg-white hover:bg-mist;
+  }
+  .chip {
+    @apply inline-flex min-h-[44px] items-center gap-1.5 rounded-full border-2 border-ink px-4 text-caption font-medium transition-colors;
+  }
+  .chip-on {
+    @apply bg-ink text-white;
+  }
+  .card {
+    @apply rounded-card bg-white p-6 shadow-sm sm:p-8;
+  }
+  .field {
+    @apply w-full rounded-btn border-2 border-charcoal bg-white px-4 py-3 text-body placeholder:text-graphite focus:border-ink;
+  }
+  .label {
+    @apply mb-2 block text-sub font-semibold;
+  }
+  .hint {
+    @apply text-caption text-graphite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
   }
 }

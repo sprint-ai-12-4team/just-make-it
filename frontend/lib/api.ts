@@ -1,109 +1,80 @@
-import type { CreateFormData, GenerateResponse } from "./types";
+import { mock } from "./mock";
+import type { DetailInput, DetailPage, GenerateInput, Generation, TextLayout, TextModel } from "./types";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// next.config.ts의 rewrites로 NEXT_PUBLIC_API_URL에 프록시. https(Vercel) → http(VM) 혼합 콘텐츠·CORS 회피
+const BASE = "/api/backend";
+const USE_MOCK = process.env.NEXT_PUBLIC_MOCK === "1";
 
-/**
- * 이미지 생성 요청
- * - 참고 이미지가 있으면 multipart, 없으면 JSON
- * - 실제 FastAPI 스펙이 확정되면 필드명만 맞추면 됨
- */
-export async function generateImage(
-  data: CreateFormData
-): Promise<GenerateResponse> {
-  const hasFile = data.referenceImage instanceof File;
-
-  if (hasFile) {
-    const form = new FormData();
-    form.append("purpose", data.purpose);
-    form.append("product_name", data.productName);
-    form.append("message", data.message);
-    form.append("generation_mode", data.generationMode);
-    if (data.style) form.append("style", data.style);
-    form.append("reference_image", data.referenceImage as File);
-
-    const res = await fetch(`${API_BASE}/generate`, {
-      method: "POST",
-      body: form,
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || `생성 요청 실패 (${res.status})`);
-    }
-    return res.json();
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
   }
+}
 
-  const res = await fetch(`${API_BASE}/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      purpose: data.purpose,
-      product_name: data.productName,
-      message: data.message,
-      style: data.style ?? null,
-      generation_mode: data.generationMode,
-      reference_image_url: null,
-    }),
-  });
+/** 브라우저별 익명 ID (api_spec 1장). 로그인 없음 */
+function clientId(): string {
+  let id = localStorage.getItem("jmi_client_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("jmi_client_id", id);
+  }
+  return id;
+}
 
+/** 사진이 있으면 multipart, 없으면 JSON. 배열은 같은 이름으로 여러 번 보냄 */
+function toBody(data: object, file?: File | null): BodyInit {
+  if (!file) return JSON.stringify(data);
+  const form = new FormData();
+  for (const [k, v] of Object.entries(data)) {
+    if (v == null) continue;
+    for (const item of Array.isArray(v) ? v : [v]) form.append(k, String(item));
+  }
+  form.append("reference_image", file);
+  return form;
+}
+
+async function call<T>(path: string, init: { method?: string; body?: BodyInit } = {}): Promise<T> {
+  const headers: Record<string, string> = { "X-Client-Id": clientId() };
+  if (typeof init.body === "string") headers["Content-Type"] = "application/json";
+  let res: Response;
+  try {
+    res = await fetch(BASE + path, { ...init, headers });
+  } catch {
+    throw new ApiError(0, "인터넷 연결을 확인하고 다시 시도해 주세요.");
+  }
+  const data = await res.json().catch(() => null);
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `생성 요청 실패 (${res.status})`);
+    // 422 등 서버 내부 형식은 사용자에게 보여주지 않음
+    const msg = typeof data?.detail === "string" ? data.detail : "잠시 후 다시 시도해 주세요.";
+    throw new ApiError(res.status, msg);
   }
-  return res.json();
+  return data as T;
 }
 
-/** 세션에 임시 저장 (페이지 간 전달용, MVP) */
-const STORAGE_KEY = "jmi_create_draft";
-
-export function saveDraft(data: Partial<CreateFormData> & { purpose: string }) {
-  if (typeof window === "undefined") return;
-  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+/** 서버는 PUBLIC_BASE_URL(http://VM)로 이미지 주소를 줌 → 프록시 경로로 바꿔 혼합 콘텐츠·canvas CORS 회피 */
+function viaProxy<T extends { image_url: string | null }>(x: T): T {
+  if (!x.image_url) return x;
+  const { pathname } = new URL(x.image_url, location.href);
+  return pathname.startsWith("/images/") ? { ...x, image_url: BASE + pathname } : x;
 }
 
-export function loadDraft(): (Partial<CreateFormData> & { purpose?: string }) | null {
-  if (typeof window === "undefined") return null;
-  const raw = sessionStorage.getItem(STORAGE_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
+const real = {
+  suggestCopies: (b: { product_name: string; message: string; style: string | null; text_model: TextModel }) =>
+    call<{ copies: string[] }>("/copies", { method: "POST", body: toBody(b) }).then((r) => r.copies),
+  generate: (b: GenerateInput, file?: File | null) =>
+    call<Generation>("/generate", { method: "POST", body: toBody(b, file) }).then(viaProxy),
+  getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
+  editText: (id: string, b: Partial<TextLayout> & { message?: string }) =>
+    call<Generation>(`/generations/${id}/text`, { method: "POST", body: toBody(b) }).then(viaProxy),
+  startDetailPage: (b: DetailInput, file?: File | null) =>
+    call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),
+  getDetailPage: (id: string) =>
+    call<DetailPage>(`/detail-pages/${id}`).then((d) => ({ ...d, sections: d.sections.map(viaProxy) })),
+  regenerateSection: (id: string, index: number, adjustments: string[]) =>
+    call<unknown>(`/detail-pages/${id}/sections/${index}`, {
+      method: "POST",
+      body: toBody({ adjustments }),
+    }),
+};
 
-export function clearDraft() {
-  if (typeof window === "undefined") return;
-  sessionStorage.removeItem(STORAGE_KEY);
-}
-
-const RESULT_KEY = "jmi_last_result";
-
-export function saveResult(payload: {
-  imageUrl: string;
-  source: string;
-  productName: string;
-  message: string;
-  purpose: string;
-}) {
-  if (typeof window === "undefined") return;
-  sessionStorage.setItem(RESULT_KEY, JSON.stringify(payload));
-}
-
-export function loadResult() {
-  if (typeof window === "undefined") return null;
-  const raw = sessionStorage.getItem(RESULT_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as {
-      imageUrl: string;
-      source: string;
-      productName: string;
-      message: string;
-      purpose: string;
-    };
-  } catch {
-    return null;
-  }
-}
+export const api: typeof real = USE_MOCK ? mock : real;
