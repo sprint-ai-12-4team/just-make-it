@@ -59,7 +59,8 @@ function ResultPage() {
     setError("");
     try {
       // ponytail: 원본 사진은 조회 응답에 없어 다시 만들 때 빠짐. 서버가 parent_id로 원본 사진을 재사용하면 해결
-      const next = await api.generate({ ...g.input, style: g.input.style ?? null, adjustments, parent_id: g.id });
+      // 글자 고치기로 바꾼 문구(g.message)를 이어 씀. g.input.message는 처음 입력값
+      const next = await api.generate({ ...g.input, message: g.message, style: g.input.style ?? null, adjustments, parent_id: g.id });
       router.push(`/result/${next.id}`);
     } catch (e) {
       setError((e as Error).message);
