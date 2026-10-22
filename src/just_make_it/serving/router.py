@@ -4,13 +4,19 @@ import asyncio
 import io
 import json
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
 from .copywriter import CopyInputError, CopyWriter
+from .detail_pages import (
+    DetailPageBusyError,
+    DetailPageNotFoundError,
+    DetailPageService,
+    SectionNotReadyError,
+)
 from .generators import GeneratorError
 from .queue_manager import (
     ERROR_GENERIC,
@@ -24,12 +30,17 @@ from .schemas import (
     TEXT_QUALITY,
     CopiesRequest,
     CopiesResponse,
+    DetailPageRequest,
+    DetailPageResponse,
+    DetailPageStarted,
     GenerateRequest,
     GenerateSuccessResponse,
     GenerationResponse,
     GenerationSpec,
     HealthResponse,
     JobState,
+    SectionRegenerateRequest,
+    SectionRegenerateStarted,
 )
 from .settings import ServingSettings
 
@@ -38,6 +49,8 @@ router = APIRouter()
 MAX_REFERENCE_SIDE = 2048  # 업로드 사진은 이 크기 이하로 줄여 메모리를 아낀다
 ALLOWED_REFERENCE_FORMATS = {"PNG", "JPEG", "WEBP"}
 REQUIRED_TEXT_FIELDS = {"product_name", "message"}
+# multipart 폼에서 같은 이름으로 여러 번(또는 JSON 배열 문자열로) 오는 목록 필드
+LIST_FIELDS = {"adjustments", "features"}
 
 MSG_REQUIRED = "상품 이름과 핵심 메시지는 꼭 입력해야 합니다."
 MSG_NOT_FOUND = "결과를 찾을 수 없어요."
@@ -45,6 +58,9 @@ MSG_TOO_LARGE = "사진은 10MB 이하로 올려 주세요."
 MSG_BAD_FORMAT = "참고 사진은 PNG, JPG, WEBP 파일만 사용할 수 있습니다."
 MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
 MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
+MSG_DETAIL_BUSY = "만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요."
+MSG_SECTION_BUSY = "아직 만들고 있어요. 다 만든 뒤에 다시 시도해 주세요."
+MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
 
 
 def _json_body_doc(model, example: dict) -> dict:
@@ -79,11 +95,19 @@ GENERATE_EXAMPLE = {
     "parent_id": None,
     "image_model": "flux2-klein-4b",
 }
+DETAIL_EXAMPLE = {
+    "product_name": "수제 딸기잼",
+    "message": "국산 딸기 100% 신상품",
+    "features": ["무첨가", "소량 생산", "선물 포장"],
+    "style": "따뜻한",
+    "image_model": "flux2-klein-4b",
+}
 
 
-def _generate_body_doc() -> dict:
-    doc = _json_body_doc(GenerateRequest, GENERATE_EXAMPLE)
-    schema = GenerateRequest.model_json_schema()
+def _form_body_doc(model, example: dict) -> dict:
+    """JSON 또는 multipart(참고 사진) 본문 문서."""
+    doc = _json_body_doc(model, example)
+    schema = model.model_json_schema()
     form_properties = dict(schema["properties"])
     form_properties["reference_image"] = {
         "type": "string",
@@ -114,6 +138,10 @@ def _records(request: Request) -> GenerationRecords:
 
 def _copywriter(request: Request) -> CopyWriter:
     return request.app.state.copywriter
+
+
+def _detail_pages(request: Request) -> DetailPageService:
+    return request.app.state.detail_pages
 
 
 def _client_id(value: str | None) -> str:
@@ -187,7 +215,7 @@ async def copies(request: Request) -> CopiesResponse:
         429: {"description": "하루 생성 한도 초과"},
         503: {"description": "생성 실패 또는 요청 과다"},
     },
-    openapi_extra={"requestBody": _generate_body_doc()},
+    openapi_extra={"requestBody": _form_body_doc(GenerateRequest, GENERATE_EXAMPLE)},
 )
 async def generate(
     request: Request,
@@ -203,7 +231,7 @@ async def generate(
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
     """
     settings = _settings(request)
-    body, reference = await _parse_generate_body(request, settings)
+    body, reference = await _parse_form_body(request, settings)
     payload = _validate(GenerateRequest, body)
     _check_lengths(payload, settings)
 
@@ -259,6 +287,105 @@ async def get_generation(request: Request, generation_id: str) -> GenerationResp
     return GenerationResponse.model_validate(record)
 
 
+# ---------------------------------------------------------------------- /detail-pages
+@router.post(
+    "/detail-pages",
+    status_code=202,
+    response_model=DetailPageStarted,
+    responses={
+        400: {"description": "필수값 누락"},
+        409: {"description": "이 사용자의 상세페이지가 이미 진행 중"},
+        413: {"description": "사진 10MB 초과"},
+        415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
+        429: {"description": "하루 생성 한도 초과"},
+    },
+    openapi_extra={"requestBody": _form_body_doc(DetailPageRequest, DETAIL_EXAMPLE)},
+)
+async def start_detail_page(
+    request: Request,
+    x_client_id: str | None = Header(default=None),
+) -> DetailPageStarted:
+    """상세페이지(5칸: 대표 · 좋은 점 ×3 · 마무리) 생성을 시작한다. **비동기 (202)**.
+
+    - 바로 `id`를 돌려주고, 문구·이미지는 뒤에서 만든다. `GET /detail-pages/{id}`를 2초마다 조회
+    - `features`를 비우면 텍스트 모델이 특징을 만든다 (최대 3개)
+    - 섹션 이미지는 글자 없이 만들고, 각 칸의 `title`·`body`를 프론트가 얹는다
+    - 사용자(`X-Client-Id`)당 진행 중인 상세페이지는 1개 (`409`)
+    """
+    settings = _settings(request)
+    body, reference = await _parse_form_body(request, settings)
+    payload = _validate(DetailPageRequest, body)
+    _check_lengths(payload, settings)
+    for feature in payload.features:
+        if len(feature) > settings.max_feature_chars:
+            raise HTTPException(
+                status_code=422,
+                detail=f"상품 특징은 {settings.max_feature_chars}자 이하로 입력해 주세요.",
+            )
+    try:
+        pid = await _detail_pages(request).start(
+            payload, reference, _client_id(x_client_id)
+        )
+    except DetailPageBusyError as exc:
+        raise HTTPException(status_code=409, detail=MSG_DETAIL_BUSY) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+    return DetailPageStarted(id=pid)
+
+
+@router.get(
+    "/detail-pages/{page_id}",
+    response_model=DetailPageResponse,
+    responses={404: {"description": "없는 상세페이지 id"}},
+)
+async def get_detail_page(request: Request, page_id: str) -> DetailPageResponse:
+    """상세페이지 진행 상황·결과. 칸이 끝나는 대로 `sections`가 채워진다."""
+    page = await asyncio.to_thread(_records(request).get_detail_page, page_id)
+    if page is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    return DetailPageResponse.model_validate(page)
+
+
+@router.post(
+    "/detail-pages/{page_id}/sections/{index}",
+    status_code=202,
+    response_model=SectionRegenerateStarted,
+    responses={
+        404: {"description": "없는 상세페이지 id 또는 칸 번호"},
+        409: {"description": "페이지 또는 그 칸을 아직 만드는 중"},
+        429: {"description": "하루 생성 한도 초과"},
+    },
+    openapi_extra={
+        "requestBody": {
+            **_json_body_doc(SectionRegenerateRequest, {"adjustments": ["더 밝게"]}),
+            "required": False,
+        }
+    },
+)
+async def regenerate_section(
+    request: Request,
+    page_id: str,
+    index: int = Path(ge=0, le=4),
+) -> SectionRegenerateStarted:
+    """섹션 1칸의 이미지만 다시 만든다 (문구는 그대로). **비동기 (202)**.
+
+    - `adjustments`: "조금 수정하기" 칩. 칩이 있으면 직전 이미지의 구도를 유지한다
+    - 페이지가 아직 `processing`이거나 그 칸이 만드는 중이면 `409`
+    """
+    body = await _read_json(request) if await request.body() else {}
+    payload = _validate(SectionRegenerateRequest, body)
+    try:
+        await _detail_pages(request).regenerate(page_id, index, payload.adjustments)
+    except DetailPageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND) from exc
+    except SectionNotReadyError as exc:
+        detail = MSG_SECTION_NO_TEXT if str(exc) == "no_text" else MSG_SECTION_BUSY
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+    return SectionRegenerateStarted(id=page_id, index=index)
+
+
 # ---------------------------------------------------------------------- 보조 함수
 def _validate(model, body: dict):
     """필수 문구가 비었으면 400, 그 밖의 타입·허용값 오류는 422 (스펙 4장)."""
@@ -290,9 +417,10 @@ async def _read_json(request: Request) -> dict:
     return body
 
 
-async def _parse_generate_body(
+async def _parse_form_body(
     request: Request, settings: ServingSettings
 ) -> tuple[dict, bytes | None]:
+    """JSON이면 그대로, multipart면 폼 필드 + 참고 사진(`reference_image`)."""
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith(
         ("multipart/form-data", "application/x-www-form-urlencoded")
@@ -301,23 +429,22 @@ async def _parse_generate_body(
 
     form = await request.form()
     body: dict = {}
-    adjustments: list[str] = []
+    lists: dict[str, list[str]] = {}
     reference: bytes | None = None
     for key, value in form.multi_items():
         if key == "reference_image":
             if isinstance(value, UploadFile) and value.filename:
                 reference = await _read_reference(value, settings)
-        elif key == "adjustments" and isinstance(value, str):
-            adjustments.extend(_split_adjustments(value))
+        elif key in LIST_FIELDS and isinstance(value, str):
+            lists.setdefault(key, []).extend(_split_list(value))
         elif isinstance(value, str):
             body[key] = value
-    if adjustments:
-        body["adjustments"] = adjustments
+    body.update({key: values for key, values in lists.items() if values})
     return body, reference
 
 
-def _split_adjustments(value: str) -> list[str]:
-    """폼의 adjustments는 같은 이름을 여러 번 보내거나 JSON 배열 문자열로 보낸다."""
+def _split_list(value: str) -> list[str]:
+    """폼의 목록 필드는 같은 이름을 여러 번 보내거나 JSON 배열 문자열로 보낸다."""
     value = value.strip()
     if value.startswith("["):
         try:
@@ -349,7 +476,9 @@ async def _read_reference(upload: UploadFile, settings: ServingSettings) -> byte
     return buffer.getvalue()
 
 
-def _check_lengths(payload: GenerateRequest, settings: ServingSettings) -> None:
+def _check_lengths(
+    payload: GenerateRequest | DetailPageRequest, settings: ServingSettings
+) -> None:
     if len(payload.product_name) > settings.max_product_name_chars:
         raise HTTPException(
             status_code=422,

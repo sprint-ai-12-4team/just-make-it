@@ -26,6 +26,7 @@ from just_make_it.core.base import (
     TextResult,
 )
 from just_make_it.serving.copywriter import CopyInputError, CopyWriter
+from just_make_it.serving.detail_pages import MockDetailWriter
 from just_make_it.serving.generators import (
     CoreGenerator,
     GeneratorError,
@@ -167,7 +168,13 @@ def unloadable(name):
 
 
 def make_client(
-    tmp_path, primary=None, fallback=None, premium=None, copywriter=None, **overrides
+    tmp_path,
+    primary=None,
+    fallback=None,
+    premium=None,
+    copywriter=None,
+    detail_writer=None,
+    **overrides,
 ):
     settings = ServingSettings(
         _env_file=None,
@@ -183,6 +190,7 @@ def make_client(
         settings=settings,
         generators=(primary, fallback, premium),
         copywriter=copywriter or FakeCopyWriter(),
+        detail_writer=detail_writer or MockDetailWriter(),
     )
     return TestClient(app)
 

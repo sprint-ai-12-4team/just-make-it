@@ -35,6 +35,13 @@ def _strip_text(value: object) -> object:
     return value
 
 
+def _clean_list(value: object) -> object:
+    # 칩·특징 목록의 빈 값을 버린다
+    if isinstance(value, list):
+        return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+    return value
+
+
 class GenerateRequest(BaseModel):
     """POST /generate 요청 본문 (JSON 또는 multipart 폼 필드).
 
@@ -59,12 +66,7 @@ class GenerateRequest(BaseModel):
         _strip_text
     )
 
-    @field_validator("adjustments", mode="before")
-    @classmethod
-    def _clean_adjustments(cls, value: object) -> object:
-        if isinstance(value, list):
-            return [v.strip() for v in value if isinstance(v, str) and v.strip()]
-        return value
+    _clean = field_validator("adjustments", mode="before")(_clean_list)
 
 
 class CopiesRequest(BaseModel):
@@ -128,6 +130,74 @@ class GenerationResponse(BaseModel):
     parent_id: str | None = None
     created_at: str
     input: GenerationInput
+
+
+class DetailPageRequest(BaseModel):
+    """POST /detail-pages 요청 본문 (JSON 또는 multipart 폼 필드)."""
+
+    product_name: str
+    message: str
+    # 상품 특징 (최대 3개). 비우면 텍스트 모델이 상품·메시지에 맞게 만든다
+    features: list[str] = Field(default_factory=list, max_length=3)
+    style: str | None = None
+    # 섹션 이미지 품질. 섹션 다시 만들기도 이 값을 그대로 쓴다
+    image_model: ImageModel = "flux2-klein-4b"
+    # 섹션 문구 품질. 비우면 서버 설정(GENERATE_TEXT_QUALITY)
+    text_model: TextModel | None = None
+
+    _strip = field_validator("product_name", "message", "style", mode="before")(
+        _strip_text
+    )
+
+    _clean = field_validator("features", mode="before")(_clean_list)
+
+
+class DetailPageStarted(BaseModel):
+    """상세페이지 접수 (POST /detail-pages 202)."""
+
+    id: str
+    status: Literal["processing"] = "processing"
+
+
+class SectionRegenerateRequest(BaseModel):
+    """POST /detail-pages/{id}/sections/{index} 요청 본문."""
+
+    adjustments: list[str] = Field(default_factory=list, max_length=10)
+
+    _clean = field_validator("adjustments", mode="before")(_clean_list)
+
+
+class SectionRegenerateStarted(BaseModel):
+    """섹션 다시 만들기 접수 (202). 결과는 GET /detail-pages/{id}로 확인."""
+
+    id: str
+    index: int
+    status: Literal["processing"] = "processing"
+
+
+class DetailSection(BaseModel):
+    index: int
+    role: Literal["hero", "feature", "closing"]
+    status: Literal["pending", "processing", "success", "error"]
+    title: str | None = None
+    body: str | None = None
+    image_url: str | None = None
+    source: Source | None = None
+
+
+class DetailProgress(BaseModel):
+    done: int
+    total: int
+
+
+class DetailPageResponse(BaseModel):
+    """상세페이지 조회 (GET /detail-pages/{id}). DB(service/db.py)가 돌려주는 모양 그대로."""
+
+    id: str
+    status: Literal["processing", "success", "error"]
+    progress: DetailProgress
+    sections: list[DetailSection]
+    created_at: str
 
 
 class HealthResponse(BaseModel):

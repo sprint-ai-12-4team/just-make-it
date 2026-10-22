@@ -56,6 +56,8 @@ class ServingSettings(BaseSettings):
     generation_timeout_seconds: float = 90.0
     # 문구 추천(/copies) 제한 시간(초). Gemma는 호출 때마다 GPU에 올렸다 내려서 여유 있게
     copy_timeout_seconds: float = 60.0
+    # 상세페이지 문구 5칸 제한 시간(초). 문구가 길어 /copies보다 여유 있게
+    detail_text_timeout_seconds: float = 90.0
 
     # ----- 응답 -----
     # /generate는 동기 응답. 대기 + 생성 + Fallback까지 이 시간(초) 안에 안 끝나면 503
@@ -67,6 +69,7 @@ class ServingSettings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
     max_product_name_chars: int = 50
     max_message_chars: int = 200
+    max_feature_chars: int = 50  # 상세페이지 특징 1개
 
     # ----- 저장 (service/db.py, service/storage.py) -----
     # DB(just_make_it.db)·생성 이미지(images/)·참고 사진(references/)을 두는 폴더.

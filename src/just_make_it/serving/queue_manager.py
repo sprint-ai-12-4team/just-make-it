@@ -79,6 +79,9 @@ class Job:
     route: Route
     client_id: str = "anonymous"
     parent_id: str | None = None
+    # 상세페이지 섹션 이미지면 페이지 id와 칸 번호
+    detail_page_id: str | None = None
+    section_index: int | None = None
     created_at: str = field(default_factory=_now_iso)
     state: JobState = JobState.QUEUED
     submitted_mono: float = field(default_factory=time.monotonic)
@@ -235,10 +238,21 @@ class QueueManager:
         premium: bool = False,
         client_id: str = "anonymous",
         parent_id: str | None = None,
+        detail_page_id: str | None = None,
+        section_index: int | None = None,
+        wait_fallback: bool = True,
     ) -> Job:
+        """작업을 접수한다.
+
+        wait_fallback=False면 대기가 길어도 OpenAI로 넘기지 않고 기다린다 (상세페이지처럼
+        결과를 폴링하는 작업. 섹션 5칸이 한꺼번에 들어와 대기가 길어 보여도 비용을 아낀다).
+        준비 안 됨·장애 Fallback은 그대로 적용된다.
+        """
+        goes_premium = premium and self._usable(self.premium)
         if (
-            self._queue.qsize() >= self.settings.queue_max_size
-            and self._fallback_reason() is None
+            not goes_premium
+            and self._queue.qsize() >= self.settings.queue_max_size
+            and self._fallback_reason(wait_fallback) is None
         ):
             raise QueueFullError("대기열이 가득 찼습니다.")
         limit = self.settings.client_daily_limit
@@ -273,6 +287,8 @@ class QueueManager:
                 parent_id=parent_id,
                 backend=generator.source,
                 model=generator.name,
+                detail_page_id=detail_page_id,
+                section_index=section_index,
             )
             if spec.reference_image is not None:
                 await asyncio.to_thread(
@@ -284,15 +300,17 @@ class QueueManager:
                 route=route,
                 client_id=client_id,
                 parent_id=parent_id,
+                detail_page_id=detail_page_id,
+                section_index=section_index,
                 fallback_reason=reason,
             )
 
-        if premium and self._usable(self.premium) and self.extra_today.take():
+        if goes_premium and self.extra_today.take():
             job = await new_job("premium", self.premium)  # type: ignore[arg-type]
             self._spawn_extra(job, self.premium)  # type: ignore[arg-type]
             return job
 
-        reason = self._fallback_reason()
+        reason = self._fallback_reason(wait_fallback)
         if reason and self.extra_today.take():
             job = await new_job("fallback", self.fallback, reason)  # type: ignore[arg-type]
             logger.info("Fallback 라우팅 (%s): job=%s", reason, job.id)
@@ -303,14 +321,34 @@ class QueueManager:
         await self._queue.put(job)
         return job
 
-    def _fallback_reason(self) -> str | None:
+    def _fallback_reason(self, wait_fallback: bool = True) -> str | None:
         if not self._usable(self.fallback):
             return None
         if not self.primary.is_ready:
             return "primary_not_ready"
-        if self.estimated_wait_for_new_job() > self.settings.max_wait_seconds:
+        if (
+            wait_fallback
+            and self.estimated_wait_for_new_job() > self.settings.max_wait_seconds
+        ):
             return "queue_wait"
         return None
+
+    async def check_capacity(self, client_id: str, count: int) -> None:
+        """작업 count개를 한꺼번에 받을 수 있는지 미리 확인한다 (상세페이지 5칸).
+
+        한도는 차감하지 않는다. 실제 차감은 칸마다 submit()에서 한다.
+
+        Raises:
+            DailyLimitError: 사용자·전체 하루 한도를 넘게 될 때
+        """
+        limit = self.settings.client_daily_limit
+        if limit:
+            used = await asyncio.to_thread(self.records.count_today, client_id)
+            if used + count > limit:
+                raise DailyLimitError("사용자 하루 생성 한도에 도달했습니다.")
+        total = self.jobs_today.limit
+        if total and self.jobs_today.count + count > total:
+            raise DailyLimitError("하루 생성 한도에 도달했습니다.")
 
     @staticmethod
     def _usable(generator: ImageGenerator | None) -> bool:
@@ -498,6 +536,8 @@ class QueueManager:
             "id": job.id,
             "client_id": job.client_id,
             "parent_id": job.parent_id,
+            "detail_page_id": job.detail_page_id,
+            "section_index": job.section_index,
             "created_at": job.created_at,
             "purpose": job.spec.purpose,
             "input_json": {

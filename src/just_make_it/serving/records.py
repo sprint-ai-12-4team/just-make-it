@@ -41,8 +41,13 @@ class GenerationRecords:
         parent_id: str | None,
         backend: Source,
         model: str,
+        detail_page_id: str | None = None,
+        section_index: int | None = None,
     ) -> str:
-        """processing 행을 만들고 id를 돌려준다. input은 GET 응답의 `input`이 된다."""
+        """processing 행을 만들고 id를 돌려준다. input은 GET 응답의 `input`이 된다.
+
+        상세페이지 섹션 이미지는 detail_page_id·section_index를 함께 남긴다.
+        """
         if parent_id and db.get_generation(parent_id) is None:
             # parent_id는 외래 키라 없는 값이면 저장이 실패한다. 새 생성으로 취급
             logger.warning("없는 parent_id 무시: %s", parent_id)
@@ -59,6 +64,8 @@ class GenerationRecords:
             backend=backend,
             model=model,
             parent_id=parent_id,
+            detail_page_id=detail_page_id,
+            section_index=section_index,
         )
 
     def finish(
@@ -112,6 +119,53 @@ class GenerationRecords:
         finally:
             conn.close()
         return row[0] if row else None
+
+    # ------------------------------------------------------------------ 상세페이지
+    def start_detail_page(self, client_id: str, input: dict) -> str:
+        return db.start_detail_page(client_id, input)
+
+    def set_detail_sections(
+        self, pid: str, sections: list[dict], text_ms: int | None
+    ) -> None:
+        db.set_detail_sections(pid, sections, text_ms)
+
+    def fail_detail_page(self, pid: str, error: str) -> None:
+        db.fail_detail_page(pid, error)
+
+    def has_running_detail_page(self, client_id: str) -> bool:
+        return db.has_running_detail_page(client_id)
+
+    def get_detail_page(self, pid: str) -> dict | None:
+        return db.get_detail_page(pid)
+
+    def section_input(self, pid: str, index: int) -> dict | None:
+        return db.section_input(pid, index)
+
+    def fail_section(
+        self,
+        *,
+        client_id: str,
+        spec: GenerationSpec,
+        detail_page_id: str,
+        section_index: int,
+        backend: Source,
+        model: str,
+        error: str,
+    ) -> None:
+        """대기열에 넣지도 못한 섹션(한도 초과 등)을 실패 행으로 남긴다.
+
+        행이 없으면 그 섹션이 계속 processing으로 보이고 페이지가 끝나지 않는다.
+        """
+        gid = self.start(
+            client_id=client_id,
+            spec=spec,
+            parent_id=None,
+            backend=backend,
+            model=model,
+            detail_page_id=detail_page_id,
+            section_index=section_index,
+        )
+        db.fail_generation(gid, error)
 
     # ------------------------------------------------------------------ 참고 사진
     def _reference_path(self, gid: str) -> Path | None:
