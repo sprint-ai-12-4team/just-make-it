@@ -18,18 +18,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock README.md ./
 
 # 가상환경 생성 + 의존성 설치 (프로덕션용, dev 의존성 제외)
+# 기본으로 GPU 의존성(torch·diffusers 등, pyproject의 gpu extra)까지 설치한다.
+# GPU 없이 OpenAI만 쓰는 가벼운 이미지가 필요하면: --build-arg UV_EXTRAS=
+ARG UV_EXTRAS="--extra gpu"
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev ${UV_EXTRAS} --no-install-project
 
 # 소스 코드 복사 후 프로젝트 설치
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev ${UV_EXTRAS}
 
 
 # ----- Stage 2: Runtime (실행 환경) -----
-# CUDA runtime 베이스를 쓰면 이미지가 커지므로,
-# 호스트에 NVIDIA Container Toolkit이 있을 때 동작하는 방식을 기본으로 함.
+# CUDA 런타임은 torch 휠(PyPI, CUDA 13.0)에 들어 있어서 CUDA 베이스 이미지가 필요 없다.
+# GPU 드라이버만 호스트에서 NVIDIA Container Toolkit으로 넘겨받는다 (드라이버 580 이상).
 # (GCP L4 인스턴스 + nvidia-docker 환경 가정)
 FROM python:3.11-slim AS runtime
 
@@ -51,9 +54,8 @@ COPY --from=builder /app/src /app/src
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-# 모델 캐시 경로 (볼륨 마운트 권장)
+# 모델 캐시 경로 (compose의 model-cache 볼륨). klein 가중치를 처음 한 번만 받는다
 ENV HF_HOME=/app/model-cache
-ENV TRANSFORMERS_CACHE=/app/model-cache
 
 # non-root 유저로 실행
 # data: 서비스 DB·생성 이미지 (compose의 service-data 볼륨이 이 소유권을 이어받음)
