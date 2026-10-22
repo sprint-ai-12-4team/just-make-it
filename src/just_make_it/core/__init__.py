@@ -4,6 +4,11 @@
 - generate_ad_image: 광고 이미지 생성 (참고 사진 선택)
 - suggest_ad_copies: 광고 문구 3개 추천
 
+받는 형태 output
+- combined (기본값): 문구를 얹은 이미지 + 글자 없는 이미지 + 문구 레이어와 위치
+- image: 글자 없는 이미지만
+- text: 디자인된 문구 레이어(투명 PNG)와 추천 위치만
+
 품질 고르기 값
 - 그림 image_quality: fast (빠르게, 기본값) / detailed (더 정교하게)
 - 문구 text_quality: basic (기본, 기본값) / natural (더 자연스럽게)

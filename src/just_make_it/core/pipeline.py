@@ -11,7 +11,13 @@ VM의 로컬 모델(klein, Gemma)이 실패하면 API 모델(flare, luna)로 폴
 3. 텍스트 모델이 상품과 메시지를 영어 묘사로 바꾸기 (품목 사전에 있으면 사전 묘사 사용)
 4. 글자 없는 영어 이미지 프롬프트 만들기
 5. 고른 품질의 이미지 모델로 생성
-6. 빠른 생성이면 분위기에 맞는 디자인으로 문구 얹기
+6. 분위기에 맞는 디자인으로 문구 레이어를 만들어 이미지에 얹기
+
+받는 형태 (output)
+- combined: 문구를 얹은 이미지. 글자 없는 이미지와 문구 레이어도 같이 줘서 웹에서 문구를 옮길 수 있음
+- image: 글자 없는 이미지만. 문구는 얹지 않고 추천 글꼴과 위치만 줌
+- text: 디자인된 문구 레이어(투명 PNG)만. 이미지 모델을 부르지 않아 GPU와 비용이 들지 않음
+세 형태 모두 문구 글꼴, 글자 크기, 위치, 크기(text_font, text_font_size, text_position, text_size)를 같이 줌
 """
 
 import io
@@ -30,9 +36,15 @@ from just_make_it.core.copywriter import (
 )
 from just_make_it.core.product_dictionary import lookup
 from just_make_it.core.prompt_builder import build_image_prompt, get_image_size
-from just_make_it.core.text_overlay import render_text
+from just_make_it.core.text_overlay import (
+    place_text,
+    render_text,
+    render_text_layer,
+)
 
-TEXT_IN_IMAGE_MODES = {"quick"}
+OUTPUTS = ("combined", "image", "text")
+# 예전 generation_mode 값. 서빙이 output으로 옮길 때까지 같은 뜻의 output으로 바꿔서 받음
+LEGACY_MODES = {"quick": "combined", "template": "image", "canvas": "image"}
 SHORTEN_ADJUSTMENT = "텍스트 짧게"
 BIGGER_TEXT_ADJUSTMENT = "글자 더 크게"
 IMAGE_QUALITIES = ("fast", "detailed")
@@ -43,28 +55,40 @@ class AdImageResult:
     """광고 이미지 생성 결과 (서빙에 전달하는 형태).
 
     Args:
-        image_bytes: 최종 PNG 이미지. 빠른 생성이면 문구까지 얹은 이미지, 그 외에는 글자 없는 이미지
-        background_bytes: 문구를 얹기 전 글자 없는 원본 이미지 (웹에서 문구를 다시 얹을 때 사용)
+        output: 받은 형태 (combined, image, text)
+        image_bytes: 최종 PNG. combined면 문구를 얹은 이미지, image면 글자 없는 이미지, text면 None
+        background_bytes: 글자 없는 원본 PNG. text면 None
+        text_layer_bytes: 디자인된 문구만 그린 투명 PNG. image면 None
+        text_font: 문구 글꼴 이름 (예: Jua). 웹에서 같은 글꼴을 불러올 때 사용
+        text_font_size: 글자 크기(px). 이미지 크기 기준
+        text_position: 문구 레이어 왼쪽 위 위치 (x, y). combined면 실제로 얹은 위치, 나머지는 추천 위치
+        text_size: 문구 레이어 크기 (가로, 세로). 테두리, 그림자, 장식 포함
         message: 이미지에 쓴 문구 (텍스트 짧게를 누르면 줄어든 문구)
-        prompt: 실제로 사용한 영어 이미지 프롬프트
-        image_model: 실제로 이미지를 만든 모델
+        prompt: 실제로 사용한 영어 이미지 프롬프트. text면 빈 문자열
+        image_model: 실제로 이미지를 만든 모델. text면 빈 문자열
         image_fallback_reason: klein 대신 flare를 쓴 이유. 폴백하지 않았으면 빈 문자열
-        text_model: 실제로 영어 묘사를 만든 텍스트 모델
+        text_model: 실제로 쓴 텍스트 모델. 텍스트 모델을 안 불렀으면 빈 문자열
         text_fallback_reason: Gemma 대신 luna를 쓴 이유. 폴백하지 않았으면 빈 문자열
-        product_source: 상품 묘사 출처 (품목 사전 또는 텍스트 모델)
+        product_source: 상품 묘사 출처 (품목 사전 또는 텍스트 모델). text면 빈 문자열
         used_reference: 참고 사진을 썼는지
-        width: 이미지 가로 크기
-        height: 이미지 세로 크기
+        width: 이미지 가로 크기 (text면 문구 크기를 맞춘 기준 크기)
+        height: 이미지 세로 크기 (text면 문구 크기를 맞춘 기준 크기)
         text_sec: 텍스트 모델 단계에 걸린 시간(초)
         image_sec: 이미지 생성에 걸린 시간(초). 폴백했으면 klein을 시도한 시간까지 포함
-        overlay_sec: 문구 얹기에 걸린 시간(초)
+        overlay_sec: 문구 레이어를 만들고 얹는 데 걸린 시간(초)
         elapsed_sec: 전체 걸린 시간(초)
         cost_usd: 예상 비용(달러). flare와 luna 비용 합계, 로컬 모델만 썼으면 0
-        seed: 실제로 쓴 시드. 조금 수정하기 때 다시 넘김 (flare면 None)
+        seed: 실제로 쓴 시드. 조금 수정하기 때 다시 넘김 (flare나 text면 None)
     """
 
-    image_bytes: bytes
-    background_bytes: bytes
+    output: str
+    image_bytes: bytes | None
+    background_bytes: bytes | None
+    text_layer_bytes: bytes | None
+    text_font: str
+    text_font_size: int
+    text_position: tuple[int, int]
+    text_size: tuple[int, int]
     message: str
     prompt: str
     image_model: str
@@ -88,12 +112,13 @@ def generate_ad_image(
     message,
     purpose="free",
     style=None,
-    generation_mode="quick",
+    output="combined",
     reference_image=None,
     adjustments=None,
     seed=None,
     image_quality="fast",
     text_quality="basic",
+    generation_mode=None,
 ):
     """프론트 입력값으로 광고 이미지를 생성합니다.
 
@@ -102,40 +127,86 @@ def generate_ad_image(
         message: 이미지에 넣을 문구 (핵심 메시지 또는 추천받은 문구)
         purpose: 광고 목적 (instagram, commerce, youtube, kakao, free)
         style: 분위기 칩 값 (밝고 경쾌한, 고급스러운, 따뜻한, 심플한, 강렬한)
-        generation_mode: quick(문구까지 얹음), template, canvas(글자 없는 이미지만)
+        output: 받는 형태. combined(이미지와 문구), image(이미지만), text(문구 레이어만)
         reference_image: 사용자가 올린 상품 사진 바이트 (선택). PNG, JPG, WEBP 등
         adjustments: 조금 수정하기 칩 목록 (예: ["더 밝게", "텍스트 짧게"])
+        seed: 비우면 랜덤. 조금 수정하기 때 이전 결과의 seed를 넘기면 구도가 유지됨 (klein만 적용)
         image_quality: 그림 품질. fast(빠르게, klein) 또는 detailed(더 정교하게, flare)
         text_quality: 문구 품질. basic(기본, Gemma) 또는 natural(더 자연스럽게, luna)
-        seed: 비우면 랜덤. 조금 수정하기 때 이전 결과의 seed를 넘기면 구도가 유지됨 (klein만 적용)
+        generation_mode: 예전 이름. 넘기면 quick은 combined, template과 canvas는 image로 바꿔서 씀
 
     Returns:
         AdImageResult: 이미지와 생성 정보
 
     Raises:
-        ValueError: 필수 입력이 비었거나, 품질 값이 잘못됐거나, 참고 사진을 읽을 수 없을 때
+        ValueError: 필수 입력이 비었거나, output이나 품질 값이 잘못됐거나, 참고 사진을 읽을 수 없을 때
         TextGenerationError: 텍스트 모델이 실패했을 때 (폴백까지 실패 포함)
         ImageGenerationError: 이미지 모델이 실패했을 때 (폴백까지 실패 포함)
     """
     total_start = time.perf_counter()
     if not product_name.strip() or not message.strip():
         raise ValueError("상품 이름과 핵심 메시지는 꼭 입력해야 합니다.")
+    if generation_mode is not None:
+        if generation_mode not in LEGACY_MODES:
+            raise ValueError(
+                f"generation_mode는 {list(LEGACY_MODES)} 중 하나여야 합니다."
+            )
+        output = LEGACY_MODES[generation_mode]
+    if output not in OUTPUTS:
+        raise ValueError(f"output은 {OUTPUTS} 중 하나여야 합니다.")
     if image_quality not in IMAGE_QUALITIES:
         raise ValueError(f"image_quality는 {IMAGE_QUALITIES} 중 하나여야 합니다.")
     check_text_quality(text_quality)
     adjustments = adjustments or []
     reference_png = _to_png(reference_image) if reference_image is not None else None
+    size_scale = 1.25 if BIGGER_TEXT_ADJUSTMENT in adjustments else 1.0
+    width, height = get_image_size(purpose)
 
     start = time.perf_counter()
-    shorten_reason = ""
     text_cost = 0.0
+    text_model = ""
+    text_reason = ""
     if SHORTEN_ADJUSTMENT in adjustments:
-        message, shorten_result, shorten_reason = shorten_message(message, text_quality)
+        message, shorten_result, text_reason = shorten_message(message, text_quality)
         text_cost += shorten_result.cost_usd
-    product_en, scene_en, product_source, text_result, text_reason = describe_for_image(
-        product_name, message, style, text_quality
+        text_model = shorten_result.model
+
+    if output == "text":
+        text_sec = time.perf_counter() - start
+        start = time.perf_counter()
+        layer_bytes, placement = render_text_layer(
+            message, style, (width, height), size_scale
+        )
+        return AdImageResult(
+            output=output,
+            image_bytes=None,
+            background_bytes=None,
+            text_layer_bytes=layer_bytes,
+            **_placement_fields(placement),
+            message=message,
+            prompt="",
+            image_model="",
+            image_fallback_reason="",
+            text_model=text_model,
+            text_fallback_reason=text_reason,
+            product_source="",
+            used_reference=False,
+            width=width,
+            height=height,
+            text_sec=round(text_sec, 2),
+            image_sec=0.0,
+            overlay_sec=round(time.perf_counter() - start, 2),
+            elapsed_sec=round(time.perf_counter() - total_start, 2),
+            cost_usd=round(text_cost, 6),
+            seed=None,
+        )
+
+    product_en, scene_en, product_source, describe_result, describe_reason = (
+        describe_for_image(product_name, message, style, text_quality)
     )
-    text_cost += text_result.cost_usd
+    text_cost += describe_result.cost_usd
+    text_model = describe_result.model
+    text_reason = describe_reason or text_reason
     text_sec = time.perf_counter() - start
 
     prompt = build_image_prompt(
@@ -146,7 +217,6 @@ def generate_ad_image(
         has_reference=reference_png is not None,
         adjustments=adjustments,
     )
-    width, height = get_image_size(purpose)
     start = time.perf_counter()
     result, image_reason = _generate_image(
         product_name, prompt, width, height, reference_png, seed, image_quality
@@ -154,25 +224,28 @@ def generate_ad_image(
     image_sec = time.perf_counter() - start
 
     start = time.perf_counter()
-    if generation_mode in TEXT_IN_IMAGE_MODES:
-        size_scale = 1.25 if BIGGER_TEXT_ADJUSTMENT in adjustments else 1.0
-        final_bytes = render_text(
+    if output == "combined":
+        final_bytes, layer_bytes, placement = render_text(
             result.image_bytes, message, style, size_scale=size_scale
         )
     else:
-        final_bytes = result.image_bytes
+        final_bytes, layer_bytes = result.image_bytes, None
+        placement = place_text(result.image_bytes, message, style, size_scale)
     overlay_sec = time.perf_counter() - start
     width, height = Image.open(io.BytesIO(final_bytes)).size
 
     return AdImageResult(
+        output=output,
         image_bytes=final_bytes,
         background_bytes=result.image_bytes,
+        text_layer_bytes=layer_bytes,
+        **_placement_fields(placement),
         message=message,
         prompt=prompt,
         image_model=result.model,
         image_fallback_reason=image_reason,
-        text_model=text_result.model,
-        text_fallback_reason=text_reason or shorten_reason,
+        text_model=text_model,
+        text_fallback_reason=text_reason,
         product_source=product_source,
         used_reference=reference_png is not None,
         width=width,
@@ -184,6 +257,16 @@ def generate_ad_image(
         cost_usd=round(result.cost_usd + text_cost, 6),
         seed=result.seed,
     )
+
+
+def _placement_fields(placement):
+    """TextPlacement를 결과 칸 이름에 맞게 바꿉니다."""
+    return {
+        "text_font": placement.font,
+        "text_font_size": placement.font_size,
+        "text_position": (placement.x, placement.y),
+        "text_size": (placement.width, placement.height),
+    }
 
 
 def _generate_image(
