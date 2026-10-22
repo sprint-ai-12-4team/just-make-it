@@ -7,6 +7,7 @@
 """
 
 import logging
+import sqlite3
 from pathlib import Path
 
 # .env를 먼저 읽어야 service/storage.py가 PUBLIC_BASE_URL을 본다 (import 시점에 읽음)
@@ -23,6 +24,7 @@ class GenerationRecords:
 
     def __init__(self, data_dir: Path) -> None:
         db.init(data_dir)  # 저장소 초기화 + 재시작 전 처리 중이던 행을 실패로 정리
+        self.db_path = data_dir / "just_make_it.db"
         self.reference_dir = data_dir / "references"
         self.reference_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +98,20 @@ class GenerationRecords:
 
     def count_today(self, client_id: str) -> int:
         return db.count_today(client_id)
+
+    def seed_of(self, gid: str) -> int | None:
+        """결과를 만들 때 쓴 시드 (조금 수정하기에서 구도 유지용). 없으면 None.
+
+        service/db.py에 조회 함수가 없어 읽기 전용 연결로 직접 읽는다.
+        """
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT seed FROM generations WHERE id=?", (gid,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
 
     # ------------------------------------------------------------------ 참고 사진
     def _reference_path(self, gid: str) -> Path | None:

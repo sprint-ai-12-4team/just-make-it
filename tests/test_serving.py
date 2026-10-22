@@ -723,6 +723,20 @@ def test_core_fast_end_to_end(tmp_path, fake_core):
     )
 
 
+def test_adjust_reuses_parent_seed_but_regenerate_does_not(tmp_path, fake_core):
+    with core_client(tmp_path) as client:
+        first = client.post("/generate", json=BASE_BODY).json()
+        # 조금 수정하기: 원본 시드(가짜 klein은 7)로 구도 유지
+        client.post(
+            "/generate",
+            json={**BASE_BODY, "parent_id": first["id"], "adjustments": ["더 밝게"]},
+        )
+        # 다시 만들기: 새 그림이어야 하니 시드를 넘기지 않음
+        client.post("/generate", json={**BASE_BODY, "parent_id": first["id"]})
+    seeds = [call["seed"] for call in fake_core["klein"].calls]
+    assert seeds == [None, 7, None]
+
+
 def test_core_saves_text_free_background(tmp_path, fake_core, monkeypatch):
     # 글자는 프론트가 얹으므로 core가 글자를 그리면 안 된다 (canvas 모드)
     from just_make_it.core import pipeline

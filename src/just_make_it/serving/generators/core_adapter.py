@@ -94,6 +94,7 @@ class CoreGenerator(ImageGenerator):
                 generation_mode=TEXT_FREE_MODE,
                 reference_image=spec.reference_image,
                 adjustments=spec.adjustments,
+                seed=spec.seed,
                 image_quality=self.image_quality,
                 text_quality=spec.text_quality,
             )

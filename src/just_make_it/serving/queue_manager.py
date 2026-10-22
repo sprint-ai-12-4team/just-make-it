@@ -250,6 +250,13 @@ class QueueManager:
         if not self.jobs_today.take():
             raise DailyLimitError("하루 생성 한도에 도달했습니다.")
 
+        # 조금 수정하기(parent_id + 수정 칩)는 원본의 시드로 구도를 유지한다.
+        # 다시 만들기(칩 없음)는 새 그림을 원하는 것이라 시드를 넘기지 않는다
+        if parent_id and spec.adjustments and spec.seed is None:
+            seed = await asyncio.to_thread(self.records.seed_of, parent_id)
+            if seed is not None:
+                spec = replace(spec, seed=seed)
+
         # 다시 만들기에서 사진을 다시 보내지 않으면 원본 결과의 참고 사진을 이어서 쓴다
         if spec.reference_image is None and parent_id:
             reference = await asyncio.to_thread(self.records.load_reference, parent_id)

@@ -160,6 +160,8 @@ class GenerationSpec:
     reference_image: bytes | None = None
     # core V1 문구 품질 (basic / natural)
     text_quality: str = "basic"
+    # 조금 수정하기 때 원본의 시드를 넘기면 구도가 유지된다 (klein만 적용, flare는 무시)
+    seed: int | None = None
 
 
 @dataclass
