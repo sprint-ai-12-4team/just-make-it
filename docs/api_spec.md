@@ -284,7 +284,8 @@
 
 - **이미지 모델은 글자 없는 이미지만 만듦** ("no text, no letters"). 문구는 서버(core `text_overlay.py`, PIL)가 분위기별 디자인으로 얹음
 - 응답에 최종 이미지(`image_url`) + 글자 없는 원본(`background_url`) + 문구(`message`) + 위치·글꼴·크기(`text_layout`)를 모두 줌
-- 사용자가 문구·위치·글꼴·크기를 고치면 `POST /generations/{id}/text` → 서버가 원본에 다시 얹음. 재생성 없음
+- 결과 화면은 기본으로 `image_url`을 그대로 씀. 사용자가 **"글자 직접 고치기"**를 누르면 프론트가 `background_url` 위에 `<canvas>`로 문구를 얹고 끌어서 옮김 (스타일 10종 `frontend/lib/textStyles.ts`, 1~5번은 core `DESIGNS`와 같은 계열, 글꼴은 `frontend/public/fonts`) — 10-22 PM 결정
+- 직접 고친 결과는 다운로드로만 남음 (서버 저장 없음 → 링크 공유는 서버 이미지). `POST /generations/{id}/text`는 서버 재렌더용으로 유지, 프론트는 현재 안 씀
 - 이유: 글자 디자인(테두리·그림자·장식·기울기)을 서버 한 곳에서만 그림 → 미리보기 = 다운로드 = 공유 이미지. 프론트 canvas와 결과가 어긋나지 않음
 - `generation_mode`는 계속 **삭제** 상태 (항상 글자를 얹음). `글자 더 크게` 칩은 `size_scale: 1.25`로 대체
 - 상세페이지 섹션은 아직 프론트 canvas로 얹음 (단일 이미지 먼저 적용)
