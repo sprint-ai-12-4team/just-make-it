@@ -172,18 +172,21 @@ def test_sizes_are_multiples_of_16():
 def test_render_text_all_designs_keep_size():
     background = png_bytes(512, 512)
     for mood in list(DESIGNS) + [None]:
-        result = render_text(background, "갓 구운 버터 향, 오늘의 소금빵", mood)
+        result, layer, _ = render_text(
+            background, "갓 구운 버터 향, 오늘의 소금빵", mood
+        )
         image = Image.open(io.BytesIO(result))
         assert image.size == (512, 512)
         assert result != background
+        assert Image.open(io.BytesIO(layer)).mode == "RGBA"
 
 
 def test_render_text_rare_glyph_uses_fallback_font():
-    result = render_text(png_bytes(512, 512), "똠양꿍 신메뉴", "밝고 경쾌한")
+    result, _, _ = render_text(png_bytes(512, 512), "똠양꿍 신메뉴", "밝고 경쾌한")
     assert Image.open(io.BytesIO(result)).size == (512, 512)
 
 
-def test_quick_mode_uses_klein_and_overlays_text(fakes):
+def test_combined_uses_klein_and_overlays_text(fakes):
     result = generate_ad_image(
         "동네빵집 버터롤", "신메뉴 출시", purpose="youtube", style="밝고 경쾌한"
     )
@@ -197,11 +200,71 @@ def test_quick_mode_uses_klein_and_overlays_text(fakes):
     assert not re.search("[가-힣]", result.prompt)
 
 
-def test_template_mode_returns_image_only(fakes):
+def test_image_output_returns_image_only(fakes):
     result = generate_ad_image(
-        "동네빵집 버터롤", "신메뉴 출시", generation_mode="template"
+        "동네빵집 버터롤",
+        "갓 구운 버터 향 가득한 오늘의 첫 소금빵",
+        output="image",
+        style="따뜻한",
+        adjustments=["텍스트 짧게"],
     )
     assert result.image_bytes == result.background_bytes
+    assert result.text_layer_bytes is None
+    # 문구는 얹지 않지만 웹에서 얹을 수 있게 줄인 문구와 추천 글꼴, 위치는 줌
+    assert result.message == "오늘의 소금빵"
+    assert result.text_font == "Yeon Sung"
+    assert result.text_font_size > 0
+    assert result.text_position is not None and result.text_size is not None
+
+
+def test_text_output_returns_layer_without_image_model(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤",
+        "신메뉴 출시",
+        purpose="youtube",
+        output="text",
+        style="강렬한",
+    )
+    assert result.image_bytes is None and result.background_bytes is None
+    layer = Image.open(io.BytesIO(result.text_layer_bytes))
+    assert layer.mode == "RGBA"
+    assert layer.getchannel("A").getextrema()[0] == 0  # 투명한 부분이 있음
+    assert layer.width <= 1536 and layer.height <= 864
+    assert result.text_size == layer.size
+    assert result.text_font == "Black Han Sans"
+    assert result.text_position is not None
+    assert fakes["klein"].calls == [] and fakes["flare"].calls == []
+    assert fakes["gemma"].calls == []
+    assert result.cost_usd == 0
+
+
+def test_text_output_with_shorten_chip(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤",
+        "갓 구운 버터 향 가득한 오늘의 첫 소금빵",
+        output="text",
+        adjustments=["텍스트 짧게"],
+    )
+    assert result.message == "오늘의 소금빵"
+    assert result.text_model == "gemma4:12b-it-qat"
+
+
+def test_combined_layer_and_position_rebuild_same_image(fakes):
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", style="고급스러운")
+    background = Image.open(io.BytesIO(result.background_bytes)).convert("RGBA")
+    layer = Image.open(io.BytesIO(result.text_layer_bytes))
+    canvas = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    canvas.paste(layer, result.text_position)
+    rebuilt = Image.alpha_composite(background, canvas).convert("RGB")
+    final = Image.open(io.BytesIO(result.image_bytes)).convert("RGB")
+    # 웹에서 원본 위 같은 위치에 레이어를 놓으면 합친 이미지와 똑같아야 함
+    assert rebuilt.tobytes() == final.tobytes()
+
+
+def test_wrong_output_raises(fakes):
+    with pytest.raises(ValueError):
+        generate_ad_image("동네빵집 버터롤", "신메뉴 출시", output="both")
+    assert fakes["gemma"].calls == []
 
 
 def test_fallback_when_klein_fails(fakes):
@@ -331,7 +394,7 @@ def test_report_counts_models_and_cost():
         "product_name": "소금빵",
         "message": "신메뉴",
         "style": "",
-        "generation_mode": "quick",
+        "output": "combined",
         "error": "",
         "image": "images/C01.png",
         "prompt": "p",
@@ -452,3 +515,26 @@ def test_luna_cost():
     )
     result = model.generate("규칙", "입력")
     assert result.cost_usd == pytest.approx((1000 * 0.20 + 500 * 1.20) / 1e6)
+
+
+def test_font_name_falls_back_for_missing_glyph(fakes):
+    result = generate_ad_image(
+        "동네식당", "똠양꿍 신메뉴", style="밝고 경쾌한", output="text"
+    )
+    assert result.text_font == "Gowun Dodum"
+
+
+def test_combined_reports_font_and_size(fakes):
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", style="강렬한")
+    layer = Image.open(io.BytesIO(result.text_layer_bytes))
+    assert result.text_font == "Black Han Sans"
+    assert result.text_size == layer.size
+
+
+def test_legacy_generation_mode_still_works(fakes):
+    canvas = generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", generation_mode="canvas"
+    )
+    quick = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", generation_mode="quick")
+    assert canvas.output == "image" and canvas.text_layer_bytes is None
+    assert quick.output == "combined" and quick.text_layer_bytes is not None
