@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from just_make_it import config
-from just_make_it.core import ai_models
+from just_make_it.core import ai_models, render_text
 from just_make_it.core.base import (
     ImageGenerationError,
     ImageResult,
@@ -26,7 +26,7 @@ from just_make_it.core.prompt_builder import (
     build_image_prompt,
     get_image_size,
 )
-from just_make_it.core.text_overlay import DESIGNS, render_text
+from just_make_it.core.text_overlay import DESIGNS, overlay_text
 
 
 def png_bytes(width=256, height=256, color="skyblue", fmt="PNG"):
@@ -172,7 +172,7 @@ def test_sizes_are_multiples_of_16():
 def test_render_text_all_designs_keep_size():
     background = png_bytes(512, 512)
     for mood in list(DESIGNS) + [None]:
-        result, layer, _ = render_text(
+        result, layer, _ = overlay_text(
             background, "갓 구운 버터 향, 오늘의 소금빵", mood
         )
         image = Image.open(io.BytesIO(result))
@@ -182,8 +182,63 @@ def test_render_text_all_designs_keep_size():
 
 
 def test_render_text_rare_glyph_uses_fallback_font():
-    result, _, _ = render_text(png_bytes(512, 512), "똠양꿍 신메뉴", "밝고 경쾌한")
+    result, layout = render_text(png_bytes(512, 512), "똠양꿍 신메뉴", "밝고 경쾌한")
     assert Image.open(io.BytesIO(result)).size == (512, 512)
+    assert layout["font"] == "dodum"  # 주아에 없는 글자라 실제로 쓴 글꼴을 돌려줌
+
+
+def test_render_text_returns_layout():
+    _, layout = render_text(png_bytes(512, 512), "오늘의 소금빵", "따뜻한")
+    assert layout == {"position": "top", "font": "yeonsung", "size_scale": 1.0}
+
+
+def test_render_text_changes_position_font_size():
+    background = png_bytes(512, 512)
+    base, _ = render_text(background, "오늘의 소금빵", "강렬한")
+    for kwargs in (
+        {"position": "middle"},
+        {"position": "bottom"},
+        {"font": "jua"},
+        {"size_scale": 1.6},
+    ):
+        edited, layout = render_text(background, "오늘의 소금빵", "강렬한", **kwargs)
+        assert edited != base
+        for key, value in kwargs.items():
+            assert layout[key] == value
+
+
+def test_render_text_positions_are_placed_in_order():
+    background = png_bytes(512, 512)
+    ys = []
+    for position in ("top", "middle", "bottom"):
+        _, _, placement = overlay_text(
+            background, "오늘의 소금빵", "심플한", position=position
+        )
+        ys.append(placement.y)
+    assert ys[0] < ys[1] < ys[2]
+
+
+def test_render_text_rejects_wrong_values():
+    background = png_bytes(512, 512)
+    for kwargs in ({"position": "left"}, {"font": "arial"}, {"size_scale": 2.0}):
+        with pytest.raises(ValueError):
+            render_text(background, "오늘의 소금빵", "심플한", **kwargs)
+
+
+def test_edit_text_from_generated_background(fakes):
+    # 글자 고치기: 생성 결과의 글자 없는 원본에 다시 얹으면 이미지 모델을 다시 부르지 않음
+    result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", style="따뜻한")
+    klein_calls = len(fakes["klein"].calls)
+    edited, layout = render_text(
+        result.background_bytes,
+        "이번 주말만 20% 할인",
+        "따뜻한",
+        position="bottom",
+        font="blackhan",
+    )
+    assert layout == {"position": "bottom", "font": "blackhan", "size_scale": 1.0}
+    assert edited != result.image_bytes
+    assert len(fakes["klein"].calls) == klein_calls
 
 
 def test_combined_uses_klein_and_overlays_text(fakes):
@@ -212,9 +267,9 @@ def test_image_output_returns_image_only(fakes):
     assert result.text_layer_bytes is None
     # 문구는 얹지 않지만 웹에서 얹을 수 있게 줄인 문구와 추천 글꼴, 위치는 줌
     assert result.message == "오늘의 소금빵"
-    assert result.text_font == "Yeon Sung"
-    assert result.text_font_size > 0
-    assert result.text_position is not None and result.text_size is not None
+    assert result.text_layout["font"] == "yeonsung"
+    assert result.text_layout["position"] in ("top", "bottom")
+    assert len(result.text_box) == 4
 
 
 def test_text_output_returns_layer_without_image_model(fakes):
@@ -230,9 +285,12 @@ def test_text_output_returns_layer_without_image_model(fakes):
     assert layer.mode == "RGBA"
     assert layer.getchannel("A").getextrema()[0] == 0  # 투명한 부분이 있음
     assert layer.width <= 1536 and layer.height <= 864
-    assert result.text_size == layer.size
-    assert result.text_font == "Black Han Sans"
-    assert result.text_position is not None
+    assert result.text_box[2:] == layer.size
+    assert result.text_layout == {
+        "position": "top",
+        "font": "blackhan",
+        "size_scale": 1.0,
+    }
     assert fakes["klein"].calls == [] and fakes["flare"].calls == []
     assert fakes["gemma"].calls == []
     assert result.cost_usd == 0
@@ -254,7 +312,7 @@ def test_combined_layer_and_position_rebuild_same_image(fakes):
     background = Image.open(io.BytesIO(result.background_bytes)).convert("RGBA")
     layer = Image.open(io.BytesIO(result.text_layer_bytes))
     canvas = Image.new("RGBA", background.size, (0, 0, 0, 0))
-    canvas.paste(layer, result.text_position)
+    canvas.paste(layer, result.text_box[:2])
     rebuilt = Image.alpha_composite(background, canvas).convert("RGB")
     final = Image.open(io.BytesIO(result.image_bytes)).convert("RGB")
     # 웹에서 원본 위 같은 위치에 레이어를 놓으면 합친 이미지와 똑같아야 함
@@ -521,20 +579,18 @@ def test_font_name_falls_back_for_missing_glyph(fakes):
     result = generate_ad_image(
         "동네식당", "똠양꿍 신메뉴", style="밝고 경쾌한", output="text"
     )
-    assert result.text_font == "Gowun Dodum"
+    assert result.text_layout["font"] == "dodum"
 
 
 def test_combined_reports_font_and_size(fakes):
     result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", style="강렬한")
     layer = Image.open(io.BytesIO(result.text_layer_bytes))
-    assert result.text_font == "Black Han Sans"
-    assert result.text_size == layer.size
+    assert result.text_layout["font"] == "blackhan"
+    assert result.text_box[2:] == layer.size
 
 
-def test_legacy_generation_mode_still_works(fakes):
-    canvas = generate_ad_image(
-        "동네빵집 버터롤", "신메뉴 출시", generation_mode="canvas"
+def test_bigger_text_chip_sets_size_scale(fakes):
+    result = generate_ad_image(
+        "동네빵집 버터롤", "신메뉴 출시", adjustments=["글자 더 크게"]
     )
-    quick = generate_ad_image("동네빵집 버터롤", "신메뉴 출시", generation_mode="quick")
-    assert canvas.output == "image" and canvas.text_layer_bytes is None
-    assert quick.output == "combined" and quick.text_layer_bytes is not None
+    assert result.text_layout["size_scale"] == 1.25
