@@ -3,15 +3,20 @@
 BFL fp8 파일은 가중치를 8비트로 줄여 저장하고, 원래 크기로 되돌리는 스케일 값을 따로 담고 있습니다.
 diffusers는 이 형식을 바로 읽지 못해서, 아래 순서로 직접 불러옵니다.
 
-1. 스케일 값을 곱해 원래 가중치로 되돌린 뒤 diffusers 모델을 만듦 (CPU에서 잠깐 원본 크기만큼 메모리를 씀)
-2. 8비트로 저장된 층은 다시 8비트 가중치와 스케일 값만 들고 있는 층(Fp8Linear)으로 바꿈
-3. 계산할 때만 그 층의 가중치를 원래 크기로 되돌려서 씀
+1. 빈 모델 틀만 만듦 (메모리를 거의 안 씀)
+2. 파일의 가중치를 하나씩 diffusers 이름으로 바꿔 틀에 채움
+   - 8비트 층은 원래 크기로 되돌리지 않고, 8비트 가중치와 스케일 값만 들고 있는 층(Fp8Linear)으로 끼움
+   - 나머지(정규화, 편향 등)는 bf16으로 채움
+3. 계산할 때만 8비트 층의 가중치를 원래 크기로 되돌려서 씀
 
+배포 VM의 시스템 메모리가 16GB라서, 원래 크기 가중치를 한꺼번에 만들지 않고 파일 크기(약 4GB) 정도만 쓰게 했습니다.
 torch와 diffusers가 있는 GPU 서버에서만 불러오는 파일입니다.
 """
 
 import torch
 import torch.nn.functional as F
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from diffusers import Flux2Transformer2DModel
 from diffusers.loaders.single_file_utils import (
     convert_flux2_transformer_checkpoint_to_diffusers,
@@ -73,29 +78,35 @@ def load_fp8_transformer(checkpoint, config_repo):
         Flux2Transformer2DModel: 8비트 층이 Fp8Linear로 바뀐 모델
 
     Raises:
-        ValueError: 스케일 값이 붙은 가중치가 8비트 2차원이 아니거나, 모델 크기와 다를 때
+        ValueError: 스케일 값이 붙은 가중치가 8비트 2차원이 아니거나, 파일과 모델이 맞지 않을 때
     """
+    config = Flux2Transformer2DModel.load_config(config_repo, subfolder="transformer")
+    with init_empty_weights():
+        transformer = Flux2Transformer2DModel.from_config(config).to(torch.bfloat16)
+
     state = {k.removeprefix(PREFIX): v for k, v in load_file(checkpoint).items()}
     scales = split_scales(state)
-
-    fp8_layers = {}
-    restored = {}
-    for key, value in state.items():
+    for key in list(state):
+        value = state.pop(key)
         scale = scales.get(key)
         if scale is None and value.dtype == torch.float8_e4m3fn:
             scale = torch.tensor(1.0)
+        # diffusers 이름으로 바꿀 때 qkv처럼 한 가중치가 여러 개로 나뉘기도 함
+        pieces = convert_flux2_transformer_checkpoint_to_diffusers({key: value})
         if scale is None:
-            restored[key] = value
+            for new_key, piece in pieces.items():
+                if piece.is_floating_point():
+                    piece = piece.to(torch.bfloat16)
+                set_module_tensor_to_device(
+                    transformer, new_key, "cpu", value=piece, dtype=piece.dtype
+                )
             continue
+
         if value.dtype != torch.float8_e4m3fn or value.ndim != 2:
             raise ValueError(
                 f"{key}는 스케일 값이 있는데 8비트 2차원 가중치가 아닙니다."
             )
-        row_scale = scale.float().reshape(-1, 1) if scale.numel() > 1 else scale.float()
-        restored[key] = (value.float() * row_scale).to(torch.bfloat16)
-
-        # diffusers 이름으로 바꿀 때 qkv처럼 한 가중치가 여러 개로 나뉘기도 해서, 같은 변환을 스케일에도 적용
-        pieces = convert_flux2_transformer_checkpoint_to_diffusers({key: value})
+        # 줄마다 스케일 값이 있으면 가중치와 똑같이 나눠야 해서 같은 변환을 적용
         if scale.numel() > 1:
             piece_scales = convert_flux2_transformer_checkpoint_to_diffusers(
                 {key: scale}
@@ -103,22 +114,26 @@ def load_fp8_transformer(checkpoint, config_repo):
         else:
             piece_scales = dict.fromkeys(pieces, scale)
         for new_key, piece in pieces.items():
-            fp8_layers[new_key] = (piece, piece_scales[new_key])
-    del state
+            _swap_in_fp8(transformer, new_key, piece, piece_scales[new_key])
 
-    transformer = Flux2Transformer2DModel.from_single_file(
-        restored,
-        config=config_repo,
-        subfolder="transformer",
-        torch_dtype=torch.bfloat16,
-    )
-    del restored
+    empty = [
+        name
+        for name, tensor in [
+            *transformer.named_parameters(),
+            *transformer.named_buffers(),
+        ]
+        if tensor.device.type == "meta"
+    ]
+    if empty:
+        raise ValueError(f"파일에 없는 가중치가 있습니다. 예: {empty[0]}")
+    return transformer.eval()
 
-    for new_key, (weight, scale) in fp8_layers.items():
-        parent_name, _, name = new_key.removesuffix(".weight").rpartition(".")
-        parent = transformer.get_submodule(parent_name)
-        old = getattr(parent, name)
-        if tuple(old.weight.shape) != tuple(weight.shape):
-            raise ValueError(f"{new_key} 크기가 모델과 다릅니다.")
-        setattr(parent, name, Fp8Linear(weight, scale, old.bias))
-    return transformer
+
+def _swap_in_fp8(transformer, weight_key, weight, scale):
+    """빈 모델 틀의 Linear 층을 Fp8Linear로 바꿔 끼웁니다. 편향은 나중에 따로 채워짐."""
+    parent_name, _, name = weight_key.removesuffix(".weight").rpartition(".")
+    parent = transformer.get_submodule(parent_name)
+    old = getattr(parent, name)
+    if tuple(old.weight.shape) != tuple(weight.shape):
+        raise ValueError(f"{weight_key} 크기가 모델과 다릅니다.")
+    setattr(parent, name, Fp8Linear(weight.contiguous(), scale, old.bias))
