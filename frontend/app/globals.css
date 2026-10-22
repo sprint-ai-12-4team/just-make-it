@@ -64,3 +64,10 @@ body {
     transition: none !important;
   }
 }
+
+/* 광고 문구 글꼴 (OFL, core/assets/fonts와 같은 파일). 글자 직접 고치기 canvas에서만 쓰므로 쓸 때 받음 */
+@font-face { font-family: "Jua"; src: url("/fonts/Jua.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "YeonSung"; src: url("/fonts/YeonSung.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "GowunBatang"; src: url("/fonts/GowunBatang-Bold.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "GowunDodum"; src: url("/fonts/GowunDodum.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "BlackHanSans"; src: url("/fonts/BlackHanSans.woff") format("woff"); font-display: swap; }
