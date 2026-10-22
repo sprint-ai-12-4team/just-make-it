@@ -19,6 +19,17 @@ dependencies = [
     "requests>=2.34.2",
 ]
 
+[project.optional-dependencies]
+# VM GPU에서 로컬 이미지 모델(FLUX.2 klein)을 돌릴 때만 설치: uv sync --extra gpu
+# Docker 이미지는 기본으로 설치함 (Dockerfile의 UV_EXTRAS). 로컬 개발·CI에는 필요 없음
+# Linux용 torch(PyPI)는 CUDA 13.0 런타임을 포함 → 호스트 드라이버 580 이상 필요
+gpu = [
+    "torch>=2.9",
+    "diffusers>=0.41",
+    "transformers>=5.0",
+    "accelerate>=1.10",
+]
+
 [project.scripts]
 just-make-it = "just_make_it:main"
 
