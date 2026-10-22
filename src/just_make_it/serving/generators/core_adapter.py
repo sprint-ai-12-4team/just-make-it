@@ -6,6 +6,10 @@ core가 품질 값에 맞는 모델을 고르고, 로컬 모델(klein·Gemma)이
 - 기본 경로: CoreGenerator("fast")     → 로컬 klein (VM GPU, 대기열 1개)
 - 우회·선택: CoreGenerator("detailed") → OpenAI flare (대기열 없이 바로)
 
+글자는 서버가 얹는다 (api_spec 5장, 10-22 결정). 단일 이미지는 output="combined"로 받아
+글자 얹은 최종 이미지 + 글자 없는 원본 + text_layout을 함께 저장한다.
+상세페이지 칸은 아직 프론트가 얹으므로 output="image"로 글자 없는 이미지만 받는다.
+
 core의 함수 이름이나 인자가 바뀌면 이 파일만 고치면 된다.
 """
 
@@ -15,9 +19,6 @@ from ..schemas import GenerationOutput, GenerationSpec, Source
 from .base import GeneratorError, ImageGenerator
 
 logger = logging.getLogger(__name__)
-
-# 글자는 프론트가 이미지 위에 얹는다 (api_spec 5장). core는 이 모드면 글자를 그리지 않는다
-TEXT_FREE_MODE = "canvas"
 
 # 품질 값 → 프론트 모델 이름 (DB·로그·/health에 남는 이름)
 MODEL_NAMES = {"fast": "flux2-klein-4b", "detailed": "openai-image-2.5-flare"}
@@ -91,7 +92,7 @@ class CoreGenerator(ImageGenerator):
                 message=spec.message,
                 purpose=spec.purpose,
                 style=spec.style,
-                generation_mode=TEXT_FREE_MODE,
+                output=spec.output,
                 reference_image=spec.reference_image,
                 adjustments=spec.adjustments,
                 seed=spec.seed,
@@ -106,9 +107,11 @@ class CoreGenerator(ImageGenerator):
         except Exception as exc:  # 예상 못 한 오류도 큐 워커가 죽지 않게 감싼다
             raise GeneratorError(f"{type(exc).__name__}: {exc}") from exc
 
+        combined = spec.output == "combined"
         return GenerationOutput(
-            # 글자 없는 원본. 문구는 응답 message로 보내 프론트가 얹는다
-            image_bytes=result.background_bytes,
+            image_bytes=result.image_bytes,
+            background_bytes=result.background_bytes if combined else None,
+            text_layout=dict(result.text_layout) if combined else None,
             message=result.message,
             model=result.image_model,
             width=result.width,

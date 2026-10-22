@@ -483,9 +483,10 @@ def test_timeout_fails_without_retry(tmp_path):
 def test_timeout_falls_back(tmp_path):
     with make_client(
         tmp_path,
-        primary=MockGenerator(1.0),
+        primary=MockGenerator(3.0),
         fallback=MockGenerator(0.01, name="fb"),
-        generation_timeout_seconds=0.2,
+        # Mock도 core로 글자를 얹어서(0.2초 남짓) 여유를 둔다
+        generation_timeout_seconds=1.0,
     ) as client:
         body = client.post("/generate", json=BASE_BODY).json()
     assert body["status"] == "success"
@@ -745,17 +746,20 @@ def test_adjust_reuses_parent_seed_but_regenerate_does_not(tmp_path, fake_core):
     assert seeds == [None, 7, None]
 
 
-def test_core_saves_text_free_background(tmp_path, fake_core, monkeypatch):
-    # 글자는 프론트가 얹으므로 core가 글자를 그리면 안 된다 (canvas 모드)
-    from just_make_it.core import pipeline
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("서버에서 글자를 얹으면 안 된다")
-
-    monkeypatch.setattr(pipeline, "render_text", fail_if_called)
+def test_core_overlays_text_and_keeps_background(tmp_path, fake_core):
+    # 글자는 서버가 얹는다 (api_spec 5장 10-22 결정): 최종 이미지 + 글자 없는 원본 + text_layout
     with core_client(tmp_path) as client:
         res = client.post("/generate", json=BASE_BODY)
+        body = res.json()
+        final = fetch_image(client, body["image_url"])
+        background = fetch_image(client, body["background_url"])
     assert res.status_code == 200, res.text
+    assert body["background_url"].endswith(f"/images/{body['id']}-bg.png")
+    assert body["text_layout"]["position"] in ("top", "middle", "bottom")
+    assert body["text_layout"]["size_scale"] == 1.0
+    # 가짜 klein은 단색 이미지 → 원본은 단색 그대로, 최종 이미지에만 글자가 있다
+    assert len(background.getcolors(10) or []) == 1
+    assert final.size == background.size and final.tobytes() != background.tobytes()
 
 
 def test_core_detailed_records_openai_cost(tmp_path, fake_core):

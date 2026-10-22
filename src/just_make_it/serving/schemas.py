@@ -17,6 +17,10 @@ Route = Literal["primary", "fallback", "premium"]
 # 프론트가 고르는 모델 (api_spec 1·3장). 화면에는 "빠르게 / 더 정교하게"로만 보인다
 ImageModel = Literal["flux2-klein-4b", "openai-image-2.5-flare"]
 TextModel = Literal["gemma-4-12b-it", "openai-gpt-5.6-luna"]
+# 글자 고치기 값 (api_spec 5장 text_layout). core text_overlay의 POSITIONS·FONTS와 같다
+TextPosition = Literal["top", "middle", "bottom"]
+FontId = Literal["jua", "yeonsung", "batang", "dodum", "blackhan"]
+SIZE_SCALE_MIN, SIZE_SCALE_MAX = 0.6, 1.6
 # 프론트 모델 이름 → core 파이프라인 V1의 품질 값
 IMAGE_QUALITY: dict[str, str] = {
     "flux2-klein-4b": "fast",
@@ -96,14 +100,26 @@ class JobState(StrEnum):
     FAILED = "error"
 
 
+class TextLayout(BaseModel):
+    """실제로 얹은 글자 위치·글꼴·크기. 결과 화면 "글자 고치기"의 처음 값."""
+
+    position: TextPosition
+    font: FontId
+    size_scale: float
+
+
 class GenerateSuccessResponse(BaseModel):
     """생성 완료 (POST /generate 200)."""
 
     id: str
     status: Literal["success"] = "success"
+    # 글자를 얹은 최종 이미지 (화면 표시·다운로드·공유)
     image_url: str
-    # 실제로 쓴 문구 ("텍스트 짧게"를 누르면 줄어든 문구). 프론트가 이미지 위에 얹는다
+    # 글자 없는 원본. 글자 고치기는 서버가 여기에 다시 얹는다
+    background_url: str | None = None
+    # 실제로 얹은 문구 ("텍스트 짧게"를 누르면 줄어든 문구)
     message: str
+    text_layout: TextLayout | None = None
     source: Source
     width: int
     height: int
@@ -123,13 +139,25 @@ class GenerationResponse(BaseModel):
     id: str
     status: Literal["processing", "success", "error"]
     image_url: str | None = None
+    background_url: str | None = None
     message: str | None = None
+    # 글자 고치기 전 예전 결과·상세페이지 칸 이미지는 None
+    text_layout: TextLayout | None = None
     source: Source | None = None
     width: int | None = None
     height: int | None = None
     parent_id: str | None = None
     created_at: str
     input: GenerationInput
+
+
+class TextEditRequest(BaseModel):
+    """POST /generations/{id}/text 요청. 보낸 필드만 바꾸고 나머지는 지금 값 유지."""
+
+    message: str | None = None
+    position: TextPosition | None = None
+    font: FontId | None = None
+    size_scale: float | None = Field(default=None, ge=SIZE_SCALE_MIN, le=SIZE_SCALE_MAX)
 
 
 class DetailPageRequest(BaseModel):
@@ -232,13 +260,18 @@ class GenerationSpec:
     text_quality: str = "basic"
     # 조금 수정하기 때 원본의 시드를 넘기면 구도가 유지된다 (klein만 적용, flare는 무시)
     seed: int | None = None
+    # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
+    # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
+    output: Literal["combined", "image"] = "combined"
 
 
 @dataclass
 class GenerationOutput:
     """생성기 결과."""
 
-    image_bytes: bytes  # 글자 없는 PNG (문구는 프론트가 얹음)
+    image_bytes: (
+        bytes  # 최종 PNG. combined면 글자를 얹은 이미지, image면 글자 없는 이미지
+    )
     message: str
     model: str
     width: int
@@ -251,5 +284,9 @@ class GenerationOutput:
     cost_usd: float | None = None
     seed: int | None = None
     text_ms: int | None = None
+    # 글자 없는 원본 (combined일 때만. 글자 고치기용)
+    background_bytes: bytes | None = None
+    # 실제로 얹은 {position, font, size_scale} (combined일 때만)
+    text_layout: dict | None = None
     # DB params_json에 남길 재현·분석용 값 (text_model, product_source 등)
     params: dict = field(default_factory=dict)

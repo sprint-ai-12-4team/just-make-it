@@ -41,6 +41,7 @@ from .schemas import (
     JobState,
     SectionRegenerateRequest,
     SectionRegenerateStarted,
+    TextEditRequest,
 )
 from .settings import ServingSettings
 
@@ -60,6 +61,8 @@ MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
 MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
 MSG_DETAIL_BUSY = "만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요."
 MSG_SECTION_BUSY = "아직 만들고 있어요. 다 만든 뒤에 다시 시도해 주세요."
+MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 고쳐 주세요."
+MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
 
 
@@ -224,7 +227,8 @@ async def generate(
     """광고 이미지를 생성한다 (다시 만들기·수정 포함). **동기 응답**.
 
     - `application/json`, 참고 사진이 있으면 `multipart/form-data`(`reference_image`)
-    - 이미지는 글자 없이 만들고, 응답 `message`를 프론트가 이미지 위에 얹는다
+    - 서버가 문구를 얹은 최종 이미지(`image_url`)와 글자 없는 원본(`background_url`),
+      얹은 위치·글꼴·크기(`text_layout`)를 함께 준다. 글자만 고칠 때는 `POST /generations/{id}/text`
     - `image_model`: `flux2-klein-4b`(빠르게, 로컬 GPU 대기열) /
       `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
     - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록). 프론트는 폴링하지 않는다
@@ -285,6 +289,93 @@ async def get_generation(request: Request, generation_id: str) -> GenerationResp
     if record is None:
         raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
     return GenerationResponse.model_validate(record)
+
+
+@router.post(
+    "/generations/{generation_id}/text",
+    response_model=GenerationResponse,
+    responses={
+        400: {"description": "문구가 빈 문자열"},
+        404: {"description": "없는 결과 id"},
+        409: {
+            "description": "아직 processing·error인 결과, 또는 원본이 없는 예전 결과"
+        },
+        422: {"description": "위치·글꼴·크기 허용값 오류"},
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            TextEditRequest,
+            {
+                "message": "이번 주말만 20% 할인",
+                "position": "bottom",
+                "font": "blackhan",
+            },
+        )
+    },
+)
+async def edit_text(request: Request, generation_id: str) -> GenerationResponse:
+    """글자(문구·위치·글꼴·크기)만 바꿔 원본 이미지에 다시 얹는다. **이미지 재생성 없음**.
+
+    - 보낸 필드만 바꾸고 나머지는 지금 값 유지. 일일 생성 한도에 세지 않음
+    - 분위기(`style`)별 색·테두리·장식은 그대로, 글꼴에 없는 글자가 있으면 `dodum`으로 대신 씀
+      → 응답 `text_layout.font`가 실제로 쓴 값
+    - 응답 `image_url`은 새 주소 (브라우저 캐시 회피)
+    """
+    body = await _read_json(request)
+    if isinstance(body.get("message"), str) and not body["message"].strip():
+        raise HTTPException(status_code=400, detail="문구를 입력해 주세요.")
+    payload = _validate(TextEditRequest, body)
+    settings = _settings(request)
+    if payload.message and len(payload.message) > settings.max_message_chars:
+        raise HTTPException(
+            status_code=422,
+            detail=f"문구는 {settings.max_message_chars}자 이하로 입력해 주세요.",
+        )
+
+    records = _records(request)
+    record = await asyncio.to_thread(records.get, generation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    if record["status"] != "success":
+        raise HTTPException(status_code=409, detail=MSG_TEXT_NOT_READY)
+    background = await asyncio.to_thread(records.background, generation_id)
+    if background is None:
+        raise HTTPException(status_code=409, detail=MSG_TEXT_NO_BACKGROUND)
+
+    current = record.get("text_layout") or {}
+    changes = payload.model_dump(exclude_none=True, exclude={"message"})
+    layout = {"size_scale": 1.0, **current, **changes}
+    message = payload.message.strip() if payload.message else record["message"]
+    try:
+        image, actual = await asyncio.to_thread(
+            _render_text,
+            background,
+            message,
+            record["input"].get("style"),
+            layout["size_scale"],
+            layout.get("position"),
+            layout.get("font"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="입력값을 확인해 주세요.") from exc
+    updated = await asyncio.to_thread(
+        records.update_text, generation_id, image, message=message, text_layout=actual
+    )
+    return GenerationResponse.model_validate(updated)
+
+
+def _render_text(background, message, style, size_scale, position, font):
+    """core 글자 얹기 (PIL, 1초 이내). GPU·OpenAI 호출 없음."""
+    from just_make_it.core import render_text
+
+    return render_text(
+        background,
+        message,
+        style,
+        size_scale=size_scale,
+        position=position,
+        font=font,
+    )
 
 
 # ---------------------------------------------------------------------- /detail-pages

@@ -427,9 +427,9 @@ def test_core_detail_page_end_to_end(
     monkeypatch.setattr(ai_models, "get_gemma", lambda: gemma)
 
     def fail_if_called(*args, **kwargs):
-        raise AssertionError("서버에서 글자를 얹으면 안 된다")
+        raise AssertionError("상세페이지 칸은 아직 프론트가 글자를 얹는다")
 
-    monkeypatch.setattr(pipeline, "render_text", fail_if_called)
+    monkeypatch.setattr(pipeline, "overlay_text", fail_if_called)
     with core_client(tmp_path, detail_writer=CoreDetailWriter()) as client:
         pid = client.post("/detail-pages", json=DETAIL_BODY).json()["id"]
         page = wait_done(client, pid)

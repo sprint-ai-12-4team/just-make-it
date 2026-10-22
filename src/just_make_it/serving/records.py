@@ -2,6 +2,7 @@
 
 - 결과 id = `generations` 행 id = 서빙 작업 id (같은 값)
 - 생성 이미지: `$DATA_DIR/images/{id}.png`, `/images/{id}.png`로 제공 (service/storage.py)
+  글자 없는 원본은 `{id}-bg.png` (`background_url`). 글자를 고치면 최종 이미지 파일 이름이 바뀐다
 - 참고 사진: `$DATA_DIR/references/{id}` (공개 URL 없음). "다시 만들기"에서
   프론트가 사진을 다시 보내지 않으면 `parent_id`의 사진을 이어서 쓴다 (api_spec 6장)
 """
@@ -85,6 +86,8 @@ class GenerationRecords:
             message=output.message,
             width=output.width,
             height=output.height,
+            background=output.background_bytes,
+            text_layout=output.text_layout,
             params={**output.params, "fallback_reason": output.fallback_reason},
             backend=source,
             route=route,
@@ -96,6 +99,16 @@ class GenerationRecords:
             image_ms=image_ms,
             cost_usd=output.cost_usd,
         )
+
+    def background(self, gid: str) -> bytes | None:
+        """글자 없는 원본. 성공한 결과가 아니거나 원본이 없는 예전 결과면 None."""
+        return db.background(gid)
+
+    def update_text(
+        self, gid: str, image: bytes, *, message: str, text_layout: dict
+    ) -> dict:
+        """글자 고치기 결과 저장. 반환값은 조회 응답 모양 (image_url이 새 주소)."""
+        return db.update_text(gid, image, message=message, text_layout=text_layout)
 
     def fail(self, gid: str, error: str) -> None:
         db.fail_generation(gid, error)
