@@ -59,6 +59,14 @@ def get_flare():
     return _get("flare", FlareImageModel)
 
 
+def unload_klein():
+    """klein을 메모리에서 내립니다. 다음에 부르면 다시 불러옵니다."""
+    with _lock:
+        klein = _loaded.pop("klein", None)
+    if klein is not None and hasattr(klein, "close"):
+        klein.close()
+
+
 def clear_models():
     """불러온 모델을 모두 비웁니다. GPU 메모리를 비울 때 씁니다."""
     with _lock:

@@ -27,7 +27,11 @@ class LunaTextModel:
                 "OPENAI_API_KEY가 없습니다. .env 파일을 확인해주세요."
             )
         self.model = model
-        self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.client = OpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=config.OPENAI_TEXT_TIMEOUT,
+            max_retries=config.OPENAI_MAX_RETRIES,
+        )
 
     def generate(self, instructions, user_input, max_tokens=300):
         """지시문과 입력으로 글을 생성합니다.
