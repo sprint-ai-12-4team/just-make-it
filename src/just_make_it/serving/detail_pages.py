@@ -19,7 +19,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .generators import GeneratorError
-from .queue_manager import DailyLimitError, QueueFullError, QueueManager
+from .queue_manager import (
+    DailyLimitError,
+    QueueFullError,
+    QueueManager,
+    run_with_deadline,
+)
 from .records import GenerationRecords
 from .schemas import IMAGE_QUALITY, TEXT_QUALITY, DetailPageRequest, GenerationSpec
 from .settings import ServingSettings
@@ -275,15 +280,14 @@ class DetailPageService:
     ) -> None:
         started = time.monotonic()
         try:
-            sections = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.writer.write,
-                    payload.product_name,
-                    payload.message,
-                    payload.features,
-                    payload.style,
-                    page.text_quality,
-                ),
+            # 시간이 지나면 core의 Gemma·luna 호출도 멈춘다 (core/deadline.py)
+            sections = await run_with_deadline(
+                self.writer.write,
+                payload.product_name,
+                payload.message,
+                payload.features,
+                payload.style,
+                page.text_quality,
                 timeout=self.settings.detail_text_timeout_seconds,
             )
         except TimeoutError:

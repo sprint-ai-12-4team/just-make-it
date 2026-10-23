@@ -23,6 +23,7 @@ from .queue_manager import (
     DailyLimitError,
     QueueFullError,
     QueueManager,
+    run_with_deadline,
 )
 from .records import GenerationRecords
 from .schemas import (
@@ -190,14 +191,13 @@ async def copies(request: Request) -> CopiesResponse:
     payload = _validate(CopiesRequest, body)
     settings = _settings(request)
     try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                _copywriter(request).suggest,
-                payload.product_name,
-                payload.message,
-                payload.style,
-                TEXT_QUALITY[payload.text_model],
-            ),
+        # 시간이 지나면 core의 Gemma·luna 호출도 멈춘다 (core/deadline.py)
+        result = await run_with_deadline(
+            _copywriter(request).suggest,
+            payload.product_name,
+            payload.message,
+            payload.style,
+            TEXT_QUALITY[payload.text_model],
             timeout=settings.copy_timeout_seconds,
         )
     except CopyInputError as exc:
@@ -269,7 +269,9 @@ async def generate(
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
 
     if not await manager.wait(job, settings.generate_wait_seconds):
-        # 작업은 뒤에서 계속 돌고 결과는 DB에 남는다 (GET /generations/{id})
+        # 프론트는 /generate를 폴링하지 않아 끝까지 만들어도 아무도 못 본다 → 작업도 멈춘다
+        # (대기 중이면 건너뛰고, 실행 중이면 core의 OpenAI·klein 호출을 끊음)
+        manager.cancel(job, "generate_wait_timeout")
         raise HTTPException(status_code=503, detail=ERROR_GENERIC)
     if job.state == JobState.FAILED:
         status_code = 400 if job.input_error else 503
