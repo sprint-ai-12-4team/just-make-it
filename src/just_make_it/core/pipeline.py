@@ -284,6 +284,8 @@ def _generate_image(
         result = ai_models.get_klein().generate(
             prompt, width, height, reference_image=reference_png, seed=seed
         )
+        if config.KLEIN_UNLOAD_AFTER_USE:
+            ai_models.unload_klein()
         return result, ""
     except ImageGenerationError as e:
         if not config.USE_FALLBACK:
