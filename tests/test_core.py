@@ -20,6 +20,7 @@ from just_make_it.core.copywriter import (
     shorten_message,
     suggest_ad_copies,
 )
+from just_make_it.core.detail_writer import suggest_detail_sections
 from just_make_it.core.pipeline import generate_ad_image
 from just_make_it.core.prompt_builder import (
     PURPOSE_SIZES,
@@ -35,6 +36,13 @@ def png_bytes(width=256, height=256, color="skyblue", fmt="PNG"):
     return buffer.getvalue()
 
 
+DETAIL_TEXT = """1 | 갓 구운 소금빵 | 매일 아침 오븐에서 꺼내요 | 나무 쟁반 위 소금빵
+2 | 버터 풍미 | 고소한 버터가 가득해요 | 버터가 녹아내린 빵 단면
+3 | 바삭한 바닥 | 겉은 바삭, 속은 촉촉 | 갈색으로 구워진 빵 바닥
+4 | 굵은 소금 | 짭짤함이 단맛을 살려요 | 소금 알갱이를 확대한 모습
+5 | 오늘 아침은 소금빵 | 지금 주문하면 내일 도착해요 | 커피와 소금빵이 놓인 식탁"""
+
+
 class FakeText:
     """지시문을 보고 그럴듯한 답을 돌려주는 가짜 텍스트 모델."""
 
@@ -43,12 +51,15 @@ class FakeText:
         self.fail = fail
         self.cost = cost
         self.calls = []
+        self.detail_text = DETAIL_TEXT
 
     def generate(self, instructions, user_input, max_tokens=300):
         self.calls.append(instructions)
         if self.fail:
             raise TextGenerationError("Ollama 연결 실패")
-        if "카피라이터" in instructions:
+        if "상세페이지" in instructions:
+            text = self.detail_text
+        elif "카피라이터" in instructions:
             text = '1. 갓 구운 버터 향, 오늘의 첫 소금빵\n- 따뜻한 온기에 담은 소금빵\n"입안 가득 고소한 풍미"'
         elif "편집자" in instructions:
             text = "오늘의 소금빵"
@@ -594,3 +605,70 @@ def test_bigger_text_chip_sets_size_scale(fakes):
         "동네빵집 버터롤", "신메뉴 출시", adjustments=["글자 더 크게"]
     )
     assert result.text_layout["size_scale"] == 1.25
+
+
+def test_detail_sections_have_five_roles(fakes):
+    sections = suggest_detail_sections("소금빵", "신메뉴 출시", style="따뜻한")
+    assert [s["role"] for s in sections] == [
+        "hero",
+        "feature",
+        "feature",
+        "feature",
+        "closing",
+    ]
+    assert sections[0] == {
+        "role": "hero",
+        "title": "갓 구운 소금빵",
+        "body": "매일 아침 오븐에서 꺼내요",
+        "image_prompt": "나무 쟁반 위 소금빵",
+    }
+
+
+def test_detail_sections_use_given_features(fakes):
+    sections = suggest_detail_sections(
+        "소금빵", "신메뉴 출시", features=["무첨가", "  ", "당일 생산", "포장", "넷째"]
+    )
+    # 빈 특징은 버리고 최대 3개만 2~4칸 제목으로 씀
+    assert [s["title"] for s in sections[1:4]] == ["무첨가", "당일 생산", "포장"]
+
+
+def test_detail_sections_retry_then_fail_on_broken_format(fakes):
+    fakes["gemma"].detail_text = "형식을 지키지 않은 답"
+    with pytest.raises(TextGenerationError):
+        suggest_detail_sections("소금빵", "신메뉴 출시")
+    assert len(fakes["gemma"].calls) == 2  # 한 번 더 시도함
+
+
+def test_detail_sections_with_natural_uses_luna(fakes):
+    suggest_detail_sections("소금빵", "신메뉴 출시", text_quality="natural")
+    assert fakes["gemma"].calls == [] and len(fakes["luna"].calls) == 1
+
+
+def test_detail_sections_require_input(fakes):
+    with pytest.raises(ValueError):
+        suggest_detail_sections(" ", "신메뉴 출시")
+    assert fakes["gemma"].calls == []
+
+
+def test_openai_clients_have_timeout(monkeypatch):
+    from just_make_it.core.ai_models import flare, luna
+
+    created = []
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    for module in (flare, luna):
+        monkeypatch.setattr(module, "OpenAI", lambda **kwargs: created.append(kwargs))
+    flare.FlareImageModel()
+    luna.LunaTextModel()
+    assert created[0]["timeout"] == config.OPENAI_IMAGE_TIMEOUT
+    assert created[1]["timeout"] == config.OPENAI_TEXT_TIMEOUT
+    assert all(c["max_retries"] == config.OPENAI_MAX_RETRIES for c in created)
+
+
+def test_klein_unloaded_after_use_when_enabled(fakes, monkeypatch):
+    unloaded = []
+    monkeypatch.setattr(ai_models, "unload_klein", lambda: unloaded.append(True))
+    generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert unloaded == []
+    monkeypatch.setattr(config, "KLEIN_UNLOAD_AFTER_USE", True)
+    generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
+    assert unloaded == [True]
