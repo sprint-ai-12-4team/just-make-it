@@ -17,6 +17,10 @@ services:
     environment:
       # 로컬 개발 시 필요에 따라 오버라이드
       - ENVIRONMENT=development
+      # 서비스 DB·생성 이미지 위치 (아래 service-data 볼륨)
+      - DATA_DIR=/app/data
+      # Gemma(문구·영어 묘사)를 돌리는 Ollama 컨테이너 주소
+      - OLLAMA_HOST=http://ollama:11434
       # GPU가 없거나 모델 테스트만 할 때 OpenAI만 쓰려면 true
       # - FORCE_OPENAI_FALLBACK=true
     volumes:
@@ -24,6 +28,8 @@ services:
       - ./src:/app/src:ro
       # 모델 가중치/캐시 유지 (이미지에 넣지 않음)
       - model-cache:/app/model-cache
+      # 생성 결과(DB·이미지) 유지. 재배포(--build)해도 지워지지 않음
+      - service-data:/app/data
     # GPU 할당 (NVIDIA Container Toolkit 필요)
     deploy:
       resources:
@@ -32,13 +38,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    # 개발 시 --reload 사용. 프로덕션 Dockerfile CMD는 --workers 1 고정
+    # 개발 시 프로덕션 Dockerfile CMD는 --workers 1 고정
     command: >
       uvicorn just_make_it.serving.main:app
       --host 0.0.0.0
       --port 8000
       --workers 1
-      --reload
+    depends_on:
+      - ollama
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -47,7 +54,42 @@ services:
       retries: 3
       start_period: 120s
 
+  # 로컬 텍스트 모델 Gemma 4 12B (core/ai_models/gemma.py가 HTTP로 호출)
+  # Gemma 4는 Ollama 0.22 이상 필요. VM에서 확인 후 버전을 고정할 것
+  ollama:
+    image: ollama/ollama:latest
+    container_name: just-make-it-ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Gemma 가중치를 한 번 받아 두는 일회성 작업 (이미 있으면 바로 끝남)
+  # 모델 태그는 core/config.py의 GEMMA_MODEL과 같아야 한다
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["ollama", "pull", "gemma4:12b-it-qat"]
+    restart: "no"
+
 volumes:
+  service-data:
+  ollama-models:
   model-cache:
     # 로컬에 모델 캐시를 남기고 싶을 때 named volume 사용
     # 필요 시 아래처럼 호스트 경로로 변경 가능:

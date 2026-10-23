@@ -7,7 +7,28 @@ authors = [
     { name = "joelchoi85", email = "jymania@naver.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "openai>=3.35.1",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+    "fonttools>=4.67.0",
+    "pillow>=13.0.0",
+    "requests>=2.34.2",
+]
+
+[project.optional-dependencies]
+# VM GPU에서 로컬 이미지 모델(FLUX.2 klein)을 돌릴 때만 설치: uv sync --extra gpu
+# Docker 이미지는 기본으로 설치함 (Dockerfile의 UV_EXTRAS). 로컬 개발·CI에는 필요 없음
+# Linux용 torch(PyPI)는 CUDA 13.0 런타임을 포함 → 호스트 드라이버 580 이상 필요
+gpu = [
+    "torch>=2.9",
+    "diffusers>=0.41",
+    "transformers>=5.0",
+    "accelerate>=1.10",
+]
 
 [project.scripts]
 just-make-it = "just_make_it:main"
@@ -15,3 +36,26 @@ just-make-it = "just_make_it:main"
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "black>=24.4",
+    "httpx>=0.27",
+    "pytest>=9.1.1",
+    "ruff>=0.6",
+]
+
+# ---------------------------------------------------------------------------
+# Code style: 포맷은 Black, 린트는 Ruff (팀 결정)
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"] # 줄 길이는 Black이 처리

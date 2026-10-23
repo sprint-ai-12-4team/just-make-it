@@ -10,6 +10,20 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // 생성 이미지는 파일명이 uuid라 내용이 안 바뀜 → 브라우저·Vercel 엣지에 1년 캐시
+  async headers() {
+    return [
+      {
+        source: "/api/backend/images/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=31536000, immutable",
+          },
+        ],
+      },
+    ];
+  },
   images: {
     remotePatterns: [
       {

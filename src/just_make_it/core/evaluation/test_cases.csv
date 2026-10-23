@@ -1,0 +1,13 @@
+case_id,purpose,product_name,message,style,output
+C01,instagram,소금빵,신메뉴 출시,따뜻한,combined
+C02,instagram,동네꽃집,주말 20% 할인,밝고 경쾌한,combined
+C03,commerce,수제 딸기잼,무설탕 수제 딸기잼,심플한,combined
+C04,commerce,원두 커피,갓 볶은 원두 1+1,고급스러운,image
+C05,youtube,떡볶이,매운맛 신메뉴 도전,강렬한,combined
+C06,youtube,네일샵,가을 신상 디자인,고급스러운,image
+C07,kakao,반찬가게,오늘의 반찬 5종 세트,따뜻한,combined
+C08,kakao,세탁소,겨울 패딩 세탁 예약,심플한,image
+C09,free,수제 케이크,생일 케이크 예약 주문,밝고 경쾌한,combined
+C10,free,카페,오픈 기념 아메리카노 50% 할인,따뜻한,combined
+C11,instagram,빈티지 소품샵,가을 신상품 입고,심플한,image
+C12,commerce,수제 비누,천연 재료로 만든 비누,따뜻한,combined
