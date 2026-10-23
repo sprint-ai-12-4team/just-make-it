@@ -29,6 +29,7 @@ jobs:
         key: ${{ secrets.VM_SSH_KEY }}
         port: ${{ secrets.VM_PORT }}
         script_stop: true
+        command_timeout: 60m
         script: |
           # 프로젝트 디렉토리로 이동
           cd /home/spai1203/just-make-it
