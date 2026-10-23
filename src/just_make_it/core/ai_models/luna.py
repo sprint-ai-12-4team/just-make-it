@@ -8,6 +8,7 @@ import time
 from openai import OpenAI
 
 from just_make_it import config
+from just_make_it.core import deadline
 from just_make_it.core.base import TextGenerationError, TextResult
 
 
@@ -50,7 +51,9 @@ class LunaTextModel:
         """
         start = time.perf_counter()
         try:
-            response = self.client.responses.create(
+            # 서빙이 제한 시간을 걸었으면 남은 시간만 기다리고 재시도하지 않음
+            client = deadline.openai_client(self.client, "luna")
+            response = client.responses.create(
                 model=self.model,
                 instructions=instructions,
                 input=user_input,
