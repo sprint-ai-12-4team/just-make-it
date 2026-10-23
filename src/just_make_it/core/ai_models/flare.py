@@ -30,7 +30,11 @@ class FlareImageModel:
             )
         self.model = model
         self.quality = quality
-        self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.client = OpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=config.OPENAI_IMAGE_TIMEOUT,
+            max_retries=config.OPENAI_MAX_RETRIES,
+        )
 
     def generate(self, prompt, width, height, reference_image=None, seed=None):
         """프롬프트로 이미지를 만듭니다. 참고 사진이 있으면 편집 API를 씁니다.

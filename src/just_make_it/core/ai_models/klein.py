@@ -103,6 +103,9 @@ class KleinImageModel:
                 ).images[0]
         except Exception as e:
             raise ImageGenerationError(f"{self.model} 이미지 생성 실패: {e}") from e
+        finally:
+            # 생성 중에 쓴 임시 메모리를 바로 돌려줌. 모델 가중치는 그대로 둬서 다음 생성이 빠름
+            self.free_memory()
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
@@ -112,6 +115,11 @@ class KleinImageModel:
             elapsed_sec=round(time.perf_counter() - start, 2),
             seed=seed,
         )
+
+    def free_memory(self):
+        """생성하면서 쓴 임시 메모리(GPU 캐시, 파이썬 객체)를 비웁니다."""
+        gc.collect()
+        self.torch.cuda.empty_cache()
 
     def close(self):
         """GPU 메모리를 비웁니다."""

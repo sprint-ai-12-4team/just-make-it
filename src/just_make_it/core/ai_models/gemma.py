@@ -11,7 +11,12 @@ from just_make_it.core.base import TextGenerationError, TextResult
 class GemmaTextModel:
     """Ollama로 띄운 Gemma 4 12B."""
 
-    def __init__(self, model=config.GEMMA_MODEL, host=config.OLLAMA_HOST, timeout=120):
+    def __init__(
+        self,
+        model=config.GEMMA_MODEL,
+        host=config.OLLAMA_HOST,
+        timeout=config.GEMMA_TIMEOUT,
+    ):
         """
         Args:
             model: Ollama 모델 태그
