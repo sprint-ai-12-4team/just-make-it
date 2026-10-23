@@ -1,12 +1,13 @@
 "use client";
 
+import { CutoutEditor } from "@/components/CutoutEditor";
 import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { shrinkPhoto } from "@/lib/draw";
 import { saveCopies } from "@/lib/textStyles";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
-import { ChevronLeft, ImagePlus, Sparkles, X } from "lucide-react";
+import { ChevronLeft, ImagePlus, Scissors, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -24,6 +25,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [photoError, setPhotoError] = useState("");
+  const [cutout, setCutout] = useState(false);
   const [detail, setDetail] = useState(false);
   const [features, setFeatures] = useState(["", "", ""]);
   const [copies, setCopies] = useState<string[]>([]);
@@ -41,12 +43,16 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
     // 휴대폰 원본은 10MB를 넘기 쉬움 → 줄인 뒤의 크기로 검사
     file = await shrinkPhoto(file).catch(() => file!);
     if (file.size > MAX_PHOTO) return setPhotoError("사진은 10MB 이하로 올려 주세요.");
+    if (photoUrl) URL.revokeObjectURL(photoUrl); // 배경 지운 사진으로 바꿀 때 이전 사진 해제
+    setCutout(false);
     setPhoto(file);
     setPhotoUrl(URL.createObjectURL(file));
   }
 
   function removePhoto() {
     URL.revokeObjectURL(photoUrl);
+    setPhotoUrl("");
+    setCutout(false);
     setPhoto(null);
   }
 
@@ -187,13 +193,20 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
       <div>
         <span className="label">상품 사진 (선택)</span>
         <p className="mb-3 hint">사진이 있으면 상품을 더 비슷하게 만들어요. PNG·JPG·WEBP, 10MB까지.</p>
-        {photo ? (
-          <div className="flex items-center gap-4 rounded-btn bg-mist p-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={photoUrl} alt="올린 상품 사진" className="size-20 rounded-sm object-cover" />
-            <span className="flex-1 truncate">{photo.name}</span>
-            <button type="button" onClick={removePhoto} className="btn-line min-h-[44px] px-4" aria-label="사진 빼기">
-              <X aria-hidden className="size-5" /> 빼기
+        {photo && cutout ? (
+          <CutoutEditor photoUrl={photoUrl} name={photo.name} onDone={pickPhoto} onCancel={() => setCutout(false)} />
+        ) : photo ? (
+          <div className="flex flex-col gap-3 rounded-btn bg-mist p-3">
+            <div className="flex items-center gap-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={photoUrl} alt="올린 상품 사진" className="size-20 rounded-sm object-cover" />
+              <span className="flex-1 truncate">{photo.name}</span>
+              <button type="button" onClick={removePhoto} className="btn-line min-h-[44px] px-4" aria-label="사진 빼기">
+                <X aria-hidden className="size-5" /> 빼기
+              </button>
+            </div>
+            <button type="button" onClick={() => setCutout(true)} className="btn-line min-h-[44px]">
+              <Scissors aria-hidden className="size-5" /> 배경 지우기
             </button>
           </div>
         ) : (
