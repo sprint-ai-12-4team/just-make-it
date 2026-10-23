@@ -3,6 +3,7 @@
 import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { shrinkPhoto } from "@/lib/draw";
+import { saveCopies } from "@/lib/textStyles";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
 import { ChevronLeft, ImagePlus, Sparkles, X } from "lucide-react";
@@ -78,6 +79,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
           { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel },
           photo,
         );
+        saveCopies(g.id, copies);
         router.push(`/result/${g.id}`);
       }
     } catch (e) {

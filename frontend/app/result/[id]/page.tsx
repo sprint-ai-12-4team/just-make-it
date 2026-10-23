@@ -5,7 +5,7 @@ import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { save } from "@/lib/draw";
-import { POSITION_Y, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
+import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
 import { ADJUSTMENTS, type Generation } from "@/lib/types";
 import { Check, Download, Link2, Pencil, RefreshCw, Undo2 } from "lucide-react";
 import Link from "next/link";
@@ -31,8 +31,10 @@ function ResultPage() {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [copies, setCopies] = useState<string[]>([]);
 
   useEffect(() => {
+    setCopies(loadCopies(id));
     api
       .getGeneration(id)
       .then(setG)
@@ -60,6 +62,7 @@ function ResultPage() {
       // 직접 고친 문구를 이어 씀. g.input.message는 처음 입력값
       const message = edit?.text.trim() || g.message;
       const next = await api.generate({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
+      saveCopies(next.id, copies);
       router.push(`/result/${next.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -116,7 +119,7 @@ function ResultPage() {
       {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
       {g.background_url &&
         (edit ? (
-          <TextEditor state={edit} onChange={setEdit} onReset={() => setEdit(null)} />
+          <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
         ) : (
           <button type="button" className="btn-line" onClick={() => startEdit(g)}>
             <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
@@ -151,12 +154,13 @@ function ResultPage() {
 
 interface EditorProps {
   state: TextState;
+  copies: string[];
   onChange: (s: TextState) => void;
   onReset: () => void;
 }
 
 /** 문구·스타일·크기. 위치는 미리보기에서 끌어서 (또는 방향키) */
-function TextEditor({ state, onChange, onReset }: EditorProps) {
+function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
   return (
     <section className="card flex flex-col gap-6">
       <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
@@ -164,6 +168,13 @@ function TextEditor({ state, onChange, onReset }: EditorProps) {
       <div>
         <label htmlFor="t" className="label">문구</label>
         <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
+        {copies.length > 0 && (
+          <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
+            {copies.map((c) => (
+              <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>{c}</Chip>
+            ))}
+          </div>
+        )}
       </div>
       <fieldset>
         <legend className="label">글자 스타일</legend>

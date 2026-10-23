@@ -216,3 +216,21 @@ export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement, s: Tex
   }
   ctx.restore();
 }
+
+/** 추천받은 문구를 결과 화면에서 다시 고를 수 있게 이 브라우저 탭에만 보관 (생성 id별) */
+const copiesKey = (id: string) => `jmi_copies_${id}`;
+
+export function saveCopies(id: string, copies: string[]) {
+  if (!copies.length) return;
+  try {
+    sessionStorage.setItem(copiesKey(id), JSON.stringify(copies));
+  } catch {}
+}
+
+export function loadCopies(id: string): string[] {
+  try {
+    return JSON.parse(sessionStorage.getItem(copiesKey(id)) ?? "[]");
+  } catch {
+    return [];
+  }
+}
