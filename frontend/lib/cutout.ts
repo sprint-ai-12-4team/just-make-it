@@ -14,7 +14,7 @@ export const FILLS = [
 
 export type Progress = (percent: number) => void;
 
-type Remover = (src: string) => Promise<{ toCanvas(): OffscreenCanvas | HTMLCanvasElement }>;
+type Remover = (image: HTMLCanvasElement) => Promise<{ toCanvas(): OffscreenCanvas | HTMLCanvasElement }>;
 let remover: Promise<Remover> | null = null;
 
 /** 모델 준비. 한 번 받은 파이프라인은 페이지를 떠날 때까지 재사용 */
@@ -51,7 +51,10 @@ export function removeBackground(img: HTMLImageElement, onProgress: Progress): P
 }
 
 async function maskOf(img: HTMLImageElement, onProgress: Progress): Promise<Uint8ClampedArray> {
-  const out = (await (await loadRemover(onProgress))(img.src)).toCanvas();
+  // 이미 불러온 그림을 canvas로 넘김 → 다시 받지 않고, SVG 등 모델이 직접 못 읽는 형식도 처리
+  const src = canvasOf(img.naturalWidth, img.naturalHeight);
+  src.getContext("2d")!.drawImage(img, 0, 0);
+  const out = (await (await loadRemover(onProgress))(src)).toCanvas();
   // 결과 크기가 원본과 달라도 원본 크기로 맞춰서 알파만 꺼냄
   const c = canvasOf(img.naturalWidth, img.naturalHeight);
   c.getContext("2d")!.drawImage(out, 0, 0, c.width, c.height);

@@ -1,5 +1,6 @@
 "use client";
 
+import { CutoutEditor } from "@/components/CutoutEditor";
 import { Shell } from "@/components/Shell";
 import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, Waiting } from "@/components/ui";
@@ -7,7 +8,7 @@ import { api } from "@/lib/api";
 import { save } from "@/lib/draw";
 import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
 import { ADJUSTMENTS, type Generation } from "@/lib/types";
-import { Check, Download, Link2, Pencil, RefreshCw, Undo2 } from "lucide-react";
+import { Check, Download, Link2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -32,6 +33,9 @@ function ResultPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copies, setCopies] = useState<string[]>([]);
+  const [cutout, setCutout] = useState(false);
+  // 배경을 지우고 다시 채운 그림 (이 브라우저에만). 비어 있으면 서버의 background_url
+  const [bgSrc, setBgSrc] = useState("");
 
   useEffect(() => {
     setCopies(loadCopies(id));
@@ -88,8 +92,21 @@ function ResultPage() {
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
-      {edit && g.background_url ? (
-        <TextCanvas src={g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
+      {cutout && g.background_url ? (
+        <CutoutEditor
+          photoUrl={g.background_url}
+          name={`광고-${g.id.slice(0, 8)}.png`}
+          cancelLabel="원래 그림 그대로 쓰기"
+          onDone={(file) => {
+            if (bgSrc) URL.revokeObjectURL(bgSrc);
+            setBgSrc(URL.createObjectURL(file));
+            setCutout(false);
+            if (!edit) startEdit(g); // 지운 그림 위에 글자를 다시 얹어 보여 줌
+          }}
+          onCancel={() => setCutout(false)}
+        />
+      ) : edit && g.background_url ? (
+        <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
       ) : (
         <div className="overflow-hidden rounded-card bg-mist shadow-sm">
           {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
@@ -125,6 +142,19 @@ function ResultPage() {
             <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
           </button>
         ))}
+
+      {g.background_url && !cutout && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button type="button" className="btn-line" onClick={() => setCutout(true)}>
+            <Scissors aria-hidden className="size-5" /> 배경 지우고 색 채우기
+          </button>
+          {bgSrc && (
+            <button type="button" className="btn-line" onClick={() => (URL.revokeObjectURL(bgSrc), setBgSrc(""))}>
+              <Undo2 aria-hidden className="size-5" /> 원래 배경으로
+            </button>
+          )}
+        </div>
+      )}
 
       <section className="card flex flex-col gap-6">
         <h2 className="text-h-sm font-bold">그림이 마음에 안 드세요?</h2>

@@ -11,12 +11,13 @@ interface Props {
   name: string;
   onDone: (file: File) => void;
   onCancel: () => void;
+  cancelLabel?: string;
 }
 
 type Tool = "erase" | "restore";
 
 /** 올린 사진의 배경을 브라우저에서 지우고, 남은 부분을 고친 뒤 단색 배경으로 채움 */
-export function CutoutEditor({ photoUrl, name, onDone, onCancel }: Props) {
+export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "원래 사진 그대로 쓰기" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [pixels, setPixels] = useState<Uint8ClampedArray | null>(null);
@@ -70,7 +71,7 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel }: Props) {
 
   if (error)
     return (
-      <Notice action={<button type="button" className="btn-line min-h-[44px] px-4" onClick={onCancel}>원래 사진 쓰기</button>}>
+      <Notice action={<button type="button" className="btn-line min-h-[44px] px-4" onClick={onCancel}>{cancelLabel}</button>}>
         {error}
       </Notice>
     );
@@ -134,7 +135,7 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel }: Props) {
           <Check aria-hidden className="size-5" /> 이 사진으로 쓰기
         </button>
         <button type="button" className="btn-line" onClick={onCancel}>
-          원래 사진 그대로 쓰기
+          {cancelLabel}
         </button>
       </div>
     </section>
