@@ -122,6 +122,7 @@ class CoreGenerator(ImageGenerator):
             cost_usd=result.cost_usd,
             seed=result.seed,
             text_ms=int(round(result.text_sec * 1000)),
+            image_ms=int(round(result.image_sec * 1000)),
             params={
                 "image_quality": self.image_quality,
                 "text_quality": spec.text_quality,
@@ -129,5 +130,6 @@ class CoreGenerator(ImageGenerator):
                 "text_fallback_reason": result.text_fallback_reason,
                 "product_source": result.product_source,
                 "used_reference": result.used_reference,
+                "overlay_ms": int(round(result.overlay_sec * 1000)),
             },
         )

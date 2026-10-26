@@ -847,3 +847,39 @@ def test_docs_show_request_body_inputs(tmp_path):
     assert {"application/json", "multipart/form-data"} <= set(generate)
     form = generate["multipart/form-data"]["schema"]["properties"]
     assert form["reference_image"]["format"] == "binary"
+
+
+# ---------------------------------------------------------------------- V1: 대기 판단·시간 기록
+def test_empty_queue_never_falls_back_for_wait(tmp_path):
+    # 1건 평균이 길어도(klein 첫 호출 등) 앞에 작업이 없으면 바로 로컬에서 시작한다
+    fallback = MockGenerator(0.01, name="fb")
+    with make_client(
+        tmp_path,
+        primary=MockGenerator(0.05),
+        fallback=fallback,
+        seconds_per_job_init=60.0,
+        max_wait_seconds=30.0,
+    ) as client:
+        body = client.post("/generate", json=BASE_BODY).json()
+    assert route_of(tmp_path, body["id"]) == "primary"
+    assert fallback.calls == 0
+
+
+def test_core_records_text_and_image_time_separately(tmp_path, fake_core, monkeypatch):
+    from just_make_it.core import pipeline
+
+    real = pipeline.describe_for_image
+
+    def slow_describe(*args, **kwargs):
+        time.sleep(0.2)  # 문구 단계만 느리게
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "describe_for_image", slow_describe)
+    with core_client(tmp_path) as client:
+        client.post("/generate", json=BASE_BODY)
+    row = db_rows(tmp_path)[0]
+    params = json.loads(row["params_json"])
+    assert row["text_ms"] >= 200  # 문구 시간
+    assert row["image_ms"] < 200  # 그림 모델만 (문구 시간이 섞이지 않음)
+    assert params["run_ms"] >= row["text_ms"] + row["image_ms"]
+    assert "overlay_ms" in params

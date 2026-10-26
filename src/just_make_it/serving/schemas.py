@@ -284,6 +284,8 @@ class GenerationOutput:
     cost_usd: float | None = None
     seed: int | None = None
     text_ms: int | None = None
+    # 그림 모델만 걸린 시간 (core image_sec). 문구·글자 얹기 제외
+    image_ms: int | None = None
     # 글자 없는 원본 (combined일 때만. 글자 고치기용)
     background_bytes: bytes | None = None
     # 실제로 얹은 {position, font, size_scale} (combined일 때만)

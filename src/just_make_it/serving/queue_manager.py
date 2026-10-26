@@ -130,6 +130,9 @@ class Job:
     input_error: bool = False
     fallback_reason: str | None = None
     cost_usd: float | None = None
+    # core가 잰 단계별 시간: 문구(영어 묘사·텍스트 짧게), 그림 모델
+    text_ms: int | None = None
+    image_ms: int | None = None
     # 지금 돌고 있는 core 호출의 Deadline. cancel()이 취소 신호를 보낸다
     deadline: Deadline | None = None
     cancelled: bool = False
@@ -146,7 +149,8 @@ class Job:
         return _ms(self.started_mono - self.submitted_mono)
 
     @property
-    def image_ms(self) -> int | None:
+    def run_ms(self) -> int | None:
+        """생성기 호출 전체(문구 + 그림 + 글자 얹기) 시간."""
         if self.started_mono is None or self.finished_mono is None:
             return None
         return _ms(self.finished_mono - self.started_mono)
@@ -361,10 +365,17 @@ class QueueManager:
             return "primary_not_ready"
         if (
             wait_fallback
+            and self._jobs_ahead() >= self.concurrency
             and self.estimated_wait_for_new_job() > self.settings.max_wait_seconds
         ):
+            # 앞에 기다리는 작업이 있어 바로 시작할 수 없을 때만 넘긴다. 빈 워커가 있으면
+            # 1건 평균 시간이 길어도(klein 첫 호출 등) 대기 자체는 0이므로 OpenAI로 넘기지 않음
             return "queue_wait"
         return None
+
+    def _jobs_ahead(self) -> int:
+        """새 작업 앞에 있는 기본 작업 수 (대기 중 + 실행 중)."""
+        return self._queue.qsize() + len(self._running)
 
     async def check_capacity(self, client_id: str, count: int) -> None:
         """작업 count개를 한꺼번에 받을 수 있는지 미리 확인한다 (상세페이지 5칸).
@@ -395,7 +406,7 @@ class QueueManager:
 
     def estimated_wait_for_new_job(self) -> float:
         """지금 접수하는 기본 작업이 끝날 때까지의 예상 시간(초)."""
-        return self._wait_for(self._queue.qsize() + len(self._running))
+        return self._wait_for(self._jobs_ahead())
 
     def cancel(self, job: Job, reason: str) -> None:
         """작업을 취소한다. 대기 중이면 건너뛰고, 실행 중이면 core가 멈추게 한다.
@@ -551,6 +562,10 @@ class QueueManager:
         job.model = output.model
         job.prompt = output.prompt
         job.cost_usd = output.cost_usd
+        # 문구·그림 시간은 core가 단계별로 잰 값. 없으면(mock 등) 호출 전체 시간을 그림으로 본다
+        job.text_ms = output.text_ms
+        job.image_ms = output.image_ms if output.image_ms is not None else job.run_ms
+        output.params = {**output.params, "run_ms": job.run_ms}
         if output.fallback_reason and job.route == "primary":
             # core가 안에서 로컬 모델 대신 API 모델로 만든 경우 (예: klein 실패 → flare)
             job.route, job.fallback_reason = "fallback", "core_fallback"
@@ -630,7 +645,9 @@ class QueueManager:
             "status": job.state.value,
             "error": job.error_internal,
             "queue_ms": job.queue_ms,
+            "text_ms": job.text_ms,
             "image_ms": job.image_ms,
+            "run_ms": job.run_ms,
             "cost_usd": job.cost_usd,
         }
         generation_log.info(json.dumps(record, ensure_ascii=False))

@@ -79,7 +79,11 @@ class GenerationRecords:
         queue_ms: int | None,
         image_ms: int | None,
     ) -> dict:
-        """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양."""
+        """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양.
+
+        시간은 따로 기록한다: queue_ms 대기, output.text_ms 문구, image_ms 그림 모델.
+        생성기 호출 전체 시간은 params의 run_ms.
+        """
         return db.finish_generation(
             gid,
             output.image_bytes,
