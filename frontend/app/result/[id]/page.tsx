@@ -6,12 +6,19 @@ import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { save } from "@/lib/draw";
+import { remember } from "@/lib/family";
 import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
 import { ADJUSTMENTS, type Generation, type Purpose } from "@/lib/types";
 import { Check, Download, Eye, EyeOff, History, Link2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+
+/** 서버가 얹은 위치·크기·분위기 그대로의 글자 상태 */
+function textOf(r: Generation): TextState {
+  const l = r.text_layout;
+  return { text: r.message, style: styleFor(r.input?.style).id, x: 0.5, y: POSITION_Y[l?.position ?? "top"], scale: l?.size_scale ?? 1 };
+}
 
 // 올린 뒤 화면에서 가려지거나 잘리는 곳 (그림 크기 대비 %)
 // ponytail: 대략값. 인스타 프로필 격자는 3:4로 보여 1:1 그림의 양옆이 잘림, 유튜브는 오른쪽 아래에 영상 길이
@@ -53,26 +60,20 @@ function ResultPage() {
   // 배경을 지우고 다시 채운 그림 (이 브라우저에만). 비어 있으면 서버의 background_url
   const [bgSrc, setBgSrc] = useState("");
   const [showCovered, setShowCovered] = useState(false);
+  const [family, setFamily] = useState<{ id: string; img: string }[]>([]);
 
   useEffect(() => {
     setCopies(loadCopies(id));
     api
       .getGeneration(id)
-      .then(setG)
+      .then((r) => {
+        setG(r);
+        setFamily(remember(r.id, r.parent_id, r.image_url));
+      })
       .catch((e) => setError(e.message));
   }, [id]);
 
-  /** 서버가 얹은 위치·크기·분위기에서 시작 */
-  function startEdit(r: Generation) {
-    const l = r.text_layout;
-    setEdit({
-      text: r.message,
-      style: styleFor(r.input?.style).id,
-      x: 0.5,
-      y: POSITION_Y[l?.position ?? "top"],
-      scale: l?.size_scale ?? 1,
-    });
-  }
+  const startEdit = (r: Generation) => setEdit(textOf(r));
 
   async function remake(adjustments: string[]) {
     if (!g?.input) return;
@@ -117,6 +118,7 @@ function ResultPage() {
           photoUrl={g.background_url}
           name={`광고-${g.id.slice(0, 8)}.png`}
           cancelLabel="원래 그림 그대로 쓰기"
+          text={edit ?? textOf(g)}
           onDone={(file) => {
             if (bgSrc) URL.revokeObjectURL(bgSrc);
             setBgSrc(URL.createObjectURL(file));
@@ -155,34 +157,39 @@ function ResultPage() {
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        {edit ? (
-          <button type="button" className="btn-fill" onClick={() => save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError)}>
-            <Download aria-hidden className="size-5" /> 내 기기에 저장
-          </button>
-        ) : (
-          // 프록시 덕분에 같은 출처라 download 속성이 동작
-          <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
-            <Download aria-hidden className="size-5" /> 내 기기에 저장
-          </a>
-        )}
-        <button type="button" className="btn-line" onClick={copyLink} aria-live="polite">
-          {copied ? <Check aria-hidden className="size-5" /> : <Link2 aria-hidden className="size-5" />}
-          {copied ? "링크를 복사했어요" : "링크 복사"}
-        </button>
-      </div>
+      {/* 배경 지우는 중에는 저장·글자 고치기를 숨김: 미리보기가 배경 지우기 화면이라 눌러도 반영이 안 보임 */}
+      {!cutout && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {edit ? (
+              <button type="button" className="btn-fill" onClick={() => save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError)}>
+                <Download aria-hidden className="size-5" /> 내 기기에 저장
+              </button>
+            ) : (
+              // 프록시 덕분에 같은 출처라 download 속성이 동작
+              <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
+                <Download aria-hidden className="size-5" /> 내 기기에 저장
+              </a>
+            )}
+            <button type="button" className="btn-line" onClick={copyLink} aria-live="polite">
+              {copied ? <Check aria-hidden className="size-5" /> : <Link2 aria-hidden className="size-5" />}
+              {copied ? "링크를 복사했어요" : "링크 복사"}
+            </button>
+          </div>
 
-      {error && <Notice>{error}</Notice>}
+          {error && <Notice>{error}</Notice>}
 
-      {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
-      {g.background_url &&
-        (edit ? (
-          <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
-        ) : (
-          <button type="button" className="btn-line" onClick={() => startEdit(g)}>
-            <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
-          </button>
-        ))}
+          {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
+          {g.background_url &&
+            (edit ? (
+              <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
+            ) : (
+              <button type="button" className="btn-line" onClick={() => startEdit(g)}>
+                <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
+              </button>
+            ))}
+        </>
+      )}
 
       {g.background_url && !cutout && (
         <div className="grid gap-3 sm:grid-cols-2">
@@ -217,6 +224,22 @@ function ResultPage() {
         </div>
       </section>
 
+      {family.length > 1 && (
+        <section className="card flex flex-col gap-4">
+          <h2 className="text-h-sm font-bold">같은 원본에서 만든 결과</h2>
+          <p className="-mt-2 hint">이 브라우저에서 만든 것만 보여요. 눌러서 그 결과로 돌아갈 수 있어요.</p>
+          <ul className="grid grid-cols-3 gap-3 sm:grid-cols-4">
+            {family.map((f, i) => (
+              <li key={f.id}>
+                <Link href={`/result/${f.id}`} aria-current={f.id === g.id ? "page" : undefined} className={`block overflow-hidden rounded-btn border-2 ${f.id === g.id ? "border-ink" : "border-mist hover:border-charcoal"}`}>
+                  {/* eslint-disable-next-line @next/next/no-img-element -- 작은 미리보기 */}
+                  <img src={f.img} alt={`${i + 1}번째 결과${f.id === g.id ? " (지금 보는 것)" : ""}`} className="block aspect-square w-full object-cover" />
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {g.parent_id && (
         <Link href={`/result/${g.parent_id}`} className="btn-line">
           <History aria-hidden className="size-5" /> 바로 전 결과로 돌아가기
