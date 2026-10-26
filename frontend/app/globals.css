@@ -56,6 +56,10 @@ body {
   .hint {
     @apply text-caption text-graphite;
   }
+  /* 미리보기 그림: 설정이 보이도록 화면 높이의 일부만 차지 (StickyPreview 안에서) */
+  .preview {
+    @apply mx-auto block h-auto max-h-[42vh] w-auto max-w-full md:max-h-[60vh];
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

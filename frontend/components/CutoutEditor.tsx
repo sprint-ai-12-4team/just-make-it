@@ -1,5 +1,6 @@
 "use client";
 
+import { StickyPreview, type Slide } from "@/components/StickyPreview";
 import { Chip, Notice } from "@/components/ui";
 import { compose, cutOf, FILLS, floodFill, HOME, pixelsOf, placeMatrix, removeBackground, type Place } from "@/lib/cutout";
 import { loadImage } from "@/lib/draw";
@@ -14,6 +15,7 @@ interface Props {
   onCancel: () => void;
   cancelLabel?: string;
   text?: TextState | null; // 결과 화면: 미리보기에만 글자를 얹어 보여 줌. 저장되는 사진에는 안 들어감
+  compare?: Slide[]; // 미리보기 옆으로 넘겨 볼 다른 그림 (예: 처음 만든 그림)
 }
 
 type Tool = "erase" | "restore" | "move";
@@ -21,7 +23,7 @@ const UNDO_MAX = 20; // ponytail: 마스크가 장당 약 1MB(1024²)라 20번�
 const SAMPLE = 2; // 누른 곳 주변 5x5 평균 색으로 비교 (포토샵 Magic Wand의 "5x5 평균")
 
 /** 올린 사진의 배경을 브라우저에서 지우고, 상품만 남긴 뒤 옮기거나 돌려서 단색 배경 위에 놓음 */
-export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "원래 사진 그대로 쓰기", text }: Props) {
+export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "원래 사진 그대로 쓰기", text, compare = [] }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [pixels, setPixels] = useState<Uint8ClampedArray | null>(null);
@@ -145,18 +147,26 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
 
   return (
     <section className="card flex flex-col gap-6" aria-label="배경 지우기">
-      <div className="overflow-hidden rounded-card shadow-sm">
+      <StickyPreview
+        slides={[
+          {
+            label: "고치는 중",
+            node: (
         <canvas
           ref={canvasRef}
           role="img"
           aria-label={tool === "move" ? "배경을 지운 미리보기. 끌어서 상품을 옮겨요" : "배경을 지운 미리보기. 누르면 비슷한 색 영역을 지우거나 살려요"}
-          className={`block h-auto w-full touch-none ${tool === "move" ? "cursor-move" : "cursor-crosshair"}`}
+          className={`preview rounded-card shadow-sm touch-none ${tool === "move" ? "cursor-move" : "cursor-crosshair"}`}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={() => (grab.current = null)}
           onPointerCancel={() => (grab.current = null)}
         />
-      </div>
+            ),
+          },
+          ...compare,
+        ]}
+      />
       {text && <p className="-mt-4 hint">글자는 미리 보기용이에요. 위치·스타일은 다음 단계 &quot;글자 직접 고치기&quot;에서 바꿔요.</p>}
 
       <fieldset className="flex flex-col gap-4">

@@ -2,6 +2,7 @@
 
 import { CutoutEditor } from "@/components/CutoutEditor";
 import { Shell } from "@/components/Shell";
+import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -107,18 +108,23 @@ function ResultPage() {
     );
 
   const covered = g.input ? COVERED[g.input.purpose] : undefined;
+  const original = {
+    label: "처음 만든 그림",
+    // eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유)
+    node: <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className="preview rounded-card bg-mist shadow-sm" />,
+  };
 
   return (
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
-      <div className="relative">
       {cutout && g.background_url ? (
         <CutoutEditor
           photoUrl={g.background_url}
           name={`광고-${g.id.slice(0, 8)}.png`}
           cancelLabel="원래 그림 그대로 쓰기"
           text={edit ?? textOf(g)}
+          compare={[original]}
           onDone={(file) => {
             if (bgSrc) URL.revokeObjectURL(bgSrc);
             setBgSrc(URL.createObjectURL(file));
@@ -127,25 +133,36 @@ function ResultPage() {
           }}
           onCancel={() => setCutout(false)}
         />
-      ) : edit && g.background_url ? (
-        <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
       ) : (
-        <div className="overflow-hidden rounded-card bg-mist shadow-sm">
-          {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
-          <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className="block h-auto w-full" />
-        </div>
+        <StickyPreview
+          slides={[
+            {
+              label: edit ? "고치는 중" : "만든 그림",
+              node: (
+                // w-fit: 가려지는 곳 표시(%)가 그림 크기에 맞게
+                <div className="relative mx-auto w-fit">
+                  {edit && g.background_url ? (
+                    <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
+                  ) : (
+                    original.node
+                  )}
+                  {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
+                  {showCovered &&
+                    covered?.boxes.map((b, i) => (
+                      <div
+                        key={i}
+                        aria-hidden
+                        className="pointer-events-none absolute bg-ink/50"
+                        style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }}
+                      />
+                    ))}
+                </div>
+              ),
+            },
+            ...(edit ? [original] : []),
+          ]}
+        />
       )}
-        {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
-        {showCovered && !cutout &&
-          covered?.boxes.map((b, i) => (
-            <div
-              key={i}
-              aria-hidden
-              className="pointer-events-none absolute bg-ink/50"
-              style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }}
-            />
-          ))}
-      </div>
 
       {covered && !cutout && (
         <div className="-mt-4 flex flex-wrap items-center gap-3">
