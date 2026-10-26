@@ -80,20 +80,32 @@ function brightness(ctx: CanvasRenderingContext2D, x: number, y: number, w: numb
   return n ? sum / n : 255;
 }
 
-/** 원본 이미지 + 문구를 canvas에 그림. 글꼴은 loadFont로 먼저 받아 둘 것 */
-export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement, s: TextState) {
+// 서버 POSITIONS 한 칸의 높이 (이미지 대비). 서버는 문구가 이 높이의 85%를 넘으면 글자를 줄임
+const AREA_H = 0.35;
+
+/** 원본 이미지(또는 canvas) + 문구를 canvas에 그림. 글꼴은 loadFont로 먼저 받아 둘 것 */
+export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLCanvasElement, s: TextState) {
   const st = TEXT_STYLES.find((t) => t.id === s.style) ?? TEXT_STYLES[0];
-  const W = (canvas.width = bg.naturalWidth);
-  const H = (canvas.height = bg.naturalHeight);
+  const W = (canvas.width = bg instanceof HTMLImageElement ? bg.naturalWidth : bg.width);
+  const H = (canvas.height = bg instanceof HTMLImageElement ? bg.naturalHeight : bg.height);
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(bg, 0, 0);
   if (!s.text.trim()) return;
 
-  const size = W * st.size * s.scale;
-  ctx.font = `${size}px "${st.font}"`;
-  ctx.letterSpacing = `${size * st.tracking}px`;
-  const lines = wrap((t) => ctx.measureText(t).width, s.text, W * Math.min(0.9, st.maxWidth * s.scale));
-  const widths = lines.map((l) => ctx.measureText(l).width);
+  // core design_text와 같은 규칙: 정해진 너비·높이에 들어갈 때까지 2px씩 줄임 → 서버가 얹은 줄 수·크기와 맞춤
+  // 크기를 키우면(scale > 1) 높이 한도도 같이 늘려서 슬라이더가 먹히게 함
+  const maxW = W * Math.min(0.9, st.maxWidth * s.scale);
+  const maxH = H * AREA_H * 0.85 * Math.max(1, s.scale);
+  let size = Math.floor(W * st.size * s.scale);
+  let lines: string[] = [], widths: number[] = [];
+  for (;;) {
+    ctx.font = `${size}px "${st.font}"`;
+    ctx.letterSpacing = `${size * st.tracking}px`;
+    lines = wrap((t) => ctx.measureText(t).width, s.text, maxW);
+    widths = lines.map((l) => ctx.measureText(l).width);
+    if ((Math.max(...widths) <= maxW && size * 1.22 * lines.length <= maxH) || size <= W * 0.04) break;
+    size -= 2;
+  }
   const lineH = size * 1.22;
   const blockW = Math.max(...widths);
   const blockH = lineH * lines.length;

@@ -25,3 +25,10 @@ assert.deepEqual([...floodFill(wrapCase, full, 4, 2, 3, 0, 0)], [255, 255, 255, 
 const near = [[250, 250, 250, 255], W, B, B].flat();
 assert.deepEqual([...floodFill(near, new Uint8ClampedArray(4).fill(255), 4, 1, 1, 0, 0)], [0, 0, 255, 255]);
 console.log("floodFill ok");
+
+// 주변 평균: 흰 바탕 속 검은 점 하나를 눌러도 바탕 전체가 잡힘 (3x3, 가운데만 검정)
+const dot = [W, W, W, W, B, W, W, W, W].flat();
+assert.deepEqual([...floodFill(dot, new Uint8ClampedArray(9).fill(255), 3, 3, 1, 1, 0, 48, 0)], [255, 255, 255, 255, 0, 255, 255, 255, 255]);
+// 누른 점(잡티)도 같이 지워짐
+assert.equal(floodFill(dot, new Uint8ClampedArray(9).fill(255), 3, 3, 1, 1, 0, 120, 1).filter((v) => v === 0).length, 9);
+console.log("sample ok");

@@ -4,17 +4,33 @@
 const MODEL = "studioludens/birefnet-lite-512";
 const REVISION = "962e67969ec6acec9c19fab76acee4f5e22e990c";
 
-/** 배경 채우기 색 (DESIGN.md 팔레트 안에서만) */
+/** 배경 채우기 추천 색. 이 밖의 색은 색 고르기(input type=color)로 */
 export const FILLS = [
-  { id: "white", name: "흰색", color: "#ffffff" },
-  { id: "mist", name: "연회색", color: "#f3f3f3" },
-  { id: "pollen", name: "연노랑", color: "#fff386" },
-  { id: "honey", name: "노랑", color: "#ffdb5b" },
+  { name: "흰색", color: "#ffffff" },
+  { name: "아이보리", color: "#fffaf0" },
+  { name: "연회색", color: "#f3f3f3" },
+  { name: "회색", color: "#bdbdbd" },
+  { name: "먹색", color: "#202020" },
+  { name: "베이지", color: "#eadcc4" },
+  { name: "살구", color: "#ffd8b8" },
+  { name: "연노랑", color: "#fff386" },
+  { name: "노랑", color: "#ffdb5b" },
+  { name: "주황", color: "#ff9f45" },
+  { name: "코랄", color: "#ff8a7a" },
+  { name: "빨강", color: "#e8343a" },
+  { name: "연분홍", color: "#ffd6e0" },
+  { name: "분홍", color: "#f78fb3" },
+  { name: "라벤더", color: "#d9ccff" },
+  { name: "보라", color: "#7b5cd6" },
+  { name: "하늘", color: "#cfe8ff" },
+  { name: "파랑", color: "#2f6fe4" },
+  { name: "민트", color: "#c8f2e0" },
+  { name: "초록", color: "#2fa86b" },
 ] as const;
 
 export type Progress = (percent: number) => void;
 
-type Remover = (src: string) => Promise<{ toCanvas(): OffscreenCanvas | HTMLCanvasElement }>;
+type Remover = (image: HTMLCanvasElement) => Promise<{ toCanvas(): OffscreenCanvas | HTMLCanvasElement }>;
 let remover: Promise<Remover> | null = null;
 
 /** 모델 준비. 한 번 받은 파이프라인은 페이지를 떠날 때까지 재사용 */
@@ -51,7 +67,10 @@ export function removeBackground(img: HTMLImageElement, onProgress: Progress): P
 }
 
 async function maskOf(img: HTMLImageElement, onProgress: Progress): Promise<Uint8ClampedArray> {
-  const out = (await (await loadRemover(onProgress))(img.src)).toCanvas();
+  // 이미 불러온 그림을 canvas로 넘김 → 다시 받지 않고, SVG 등 모델이 직접 못 읽는 형식도 처리
+  const src = canvasOf(img.naturalWidth, img.naturalHeight);
+  src.getContext("2d")!.drawImage(img, 0, 0);
+  const out = (await (await loadRemover(onProgress))(src)).toCanvas();
   // 결과 크기가 원본과 달라도 원본 크기로 맞춰서 알파만 꺼냄
   const c = canvasOf(img.naturalWidth, img.naturalHeight);
   c.getContext("2d")!.drawImage(out, 0, 0, c.width, c.height);
@@ -73,11 +92,21 @@ export function floodFill(
   x: number,
   y: number,
   value: number,
-  tolerance = 32,
+  tolerance = 48,
+  sample = 0,
 ): Uint8ClampedArray {
   const next = alpha.slice();
   const seed = y * width + x;
-  const [r0, g0, b0] = [rgba[seed * 4], rgba[seed * 4 + 1], rgba[seed * 4 + 2]];
+  // 기준 색: 누른 곳 주변 (2·sample+1)² 칸 평균 (포토샵 "5x5 평균"). 잡티 한 점을 눌러도 영역이 좁아지지 않음
+  let r0 = 0, g0 = 0, b0 = 0, n = 0;
+  for (let dy = -sample; dy <= sample; dy++)
+    for (let dx = -sample; dx <= sample; dx++) {
+      const sx = x + dx, sy = y + dy;
+      if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+      const q = (sy * width + sx) * 4;
+      r0 += rgba[q]; g0 += rgba[q + 1]; b0 += rgba[q + 2]; n++;
+    }
+  r0 /= n; g0 /= n; b0 /= n;
   const near = (p: number) =>
     Math.max(Math.abs(rgba[p * 4] - r0), Math.abs(rgba[p * 4 + 1] - g0), Math.abs(rgba[p * 4 + 2] - b0)) <= tolerance;
   const seen = new Uint8Array(width * height);
@@ -96,23 +125,50 @@ export function floodFill(
   return next;
 }
 
-/** 원본 + 마스크 + 배경색을 canvas에 그림 (미리보기·저장 공용) */
-export function compose(canvas: HTMLCanvasElement, img: HTMLImageElement, alpha: Uint8ClampedArray, fill: string) {
-  const w = img.naturalWidth;
-  const h = img.naturalHeight;
-  const cut = canvasOf(w, h);
+/** 상품 자리: 가운데에서 옮긴 거리(이미지 대비), 크기, 회전(도), 기울기(도), 뒤집기 */
+export interface Place {
+  x: number;
+  y: number;
+  scale: number;
+  rotate: number;
+  skew: number;
+  flipX: boolean;
+  flipY: boolean;
+}
+export const HOME: Place = { x: 0, y: 0, scale: 1, rotate: 0, skew: 0, flipX: false, flipY: false };
+
+/** 상품 층 좌표 → 그림 좌표. 역행렬로 누른 곳이 원본 사진의 어느 픽셀인지도 찾음 */
+export function placeMatrix(w: number, h: number, p: Place): DOMMatrix {
+  return new DOMMatrix()
+    .translate(w / 2 + p.x * w, h / 2 + p.y * h)
+    .rotate(p.rotate)
+    .skewX(p.skew)
+    .scale(p.scale * (p.flipX ? -1 : 1), p.scale * (p.flipY ? -1 : 1))
+    .translate(-w / 2, -h / 2);
+}
+
+/** 원본 + 마스크 → 배경이 투명한 상품 층. 마스크가 바뀔 때만 다시 만듦 (옮길 때마다 만들면 느림) */
+export function cutOf(img: HTMLImageElement, alpha: Uint8ClampedArray): HTMLCanvasElement {
+  const cut = canvasOf(img.naturalWidth, img.naturalHeight);
   const cx = cut.getContext("2d")!;
   cx.drawImage(img, 0, 0);
-  const data = cx.getImageData(0, 0, w, h);
+  const data = cx.getImageData(0, 0, cut.width, cut.height);
   for (let i = 0; i < alpha.length; i++) data.data[i * 4 + 3] = alpha[i];
   cx.putImageData(data, 0, 0);
+  return cut;
+}
 
+/** 배경색 + 상품 층을 canvas에 그림 (미리보기·저장 공용). 크기는 원본 사진 그대로 */
+export function compose(canvas: HTMLCanvasElement, cut: HTMLCanvasElement, fill: string, place: Place) {
+  const { width: w, height: h } = cut;
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d")!;
   ctx.fillStyle = fill;
   ctx.fillRect(0, 0, w, h);
+  ctx.setTransform(placeMatrix(w, h, place));
   ctx.drawImage(cut, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
 /** 원본 픽셀 (Magic Wand가 색을 비교할 때 씀) */
@@ -122,7 +178,7 @@ export function pixelsOf(img: HTMLImageElement): Uint8ClampedArray {
   return c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
 }
 
-function canvasOf(w: number, h: number) {
+export function canvasOf(w: number, h: number) {
   const c = document.createElement("canvas");
   c.width = w;
   c.height = h;

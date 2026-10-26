@@ -1,7 +1,7 @@
 "use client";
 
 import { CutoutEditor } from "@/components/CutoutEditor";
-import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
+import { Chip, FieldError, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { shrinkPhoto } from "@/lib/draw";
 import { saveCopies } from "@/lib/textStyles";
@@ -152,6 +152,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
         <p className="mb-2 hint">이미지에 크게 들어갈 문장이에요. 짧을수록 잘 보여요.</p>
         <input id="msg" className="field" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="예: 주말 20% 할인, 신메뉴 출시" aria-invalid={tried && !message.trim()} aria-describedby="msg-err" />
         {tried && !message.trim() && <FieldError id="msg-err">하고 싶은 말을 적어 주세요.</FieldError>}
+        <RiskyWords text={message} />
 
         <button type="button" onClick={suggest} disabled={!ready || copyBusy} className="btn-line mt-3 w-full sm:w-auto">
           <Sparkles aria-hidden className="size-5" />
