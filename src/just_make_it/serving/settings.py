@@ -49,6 +49,9 @@ class ServingSettings(BaseSettings):
     daily_job_limit: int = 300  # 하루 전체 생성 요청 수
     extra_daily_limit: int = 100  # 그중 Fallback·프리미엄 호출 수
     client_daily_limit: int = 0  # 사용자(X-Client-Id) 1명당 하루 생성 수 (DB 기준)
+    # OpenAI 하루 금액 상한(달러, 생성 기록의 cost_usd 합계). 넘으면 회로를 열어
+    # OpenAI로 넘기지 않고 로컬 대기열에서 기다린다. 크레딧 $30 보호용 (0이면 끔)
+    openai_daily_budget_usd: float = 3.0
 
     # ----- 타임아웃 -----
     # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리

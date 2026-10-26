@@ -187,6 +187,37 @@ class _DailyCounter:
             self._day, self._count = today, 0
 
 
+class _DailyBudget:
+    """Asia/Seoul 자정마다 초기화되는 OpenAI 금액 합계. limit 0이면 끔."""
+
+    def __init__(self, limit_usd: float) -> None:
+        self.limit = limit_usd
+        self._day: date = _DailyCounter._today()
+        self._spent = 0.0
+
+    @property
+    def spent(self) -> float:
+        self._roll()
+        return self._spent
+
+    @property
+    def exceeded(self) -> bool:
+        return bool(self.limit) and self.spent >= self.limit
+
+    def add(self, usd: float | None) -> None:
+        self._roll()
+        self._spent += usd or 0.0
+
+    def set(self, usd: float) -> None:
+        self._roll()
+        self._spent = usd
+
+    def _roll(self) -> None:
+        today = _DailyCounter._today()
+        if today != self._day:
+            self._day, self._spent = today, 0.0
+
+
 class QueueManager:
     """작업 접수, 경로 선택, 실행, 상태 조회를 담당한다."""
 
@@ -208,6 +239,9 @@ class QueueManager:
         self.seconds_per_job = settings.seconds_per_job_init
         self.jobs_today = _DailyCounter(settings.daily_job_limit)
         self.extra_today = _DailyCounter(settings.extra_daily_limit)
+        # OpenAI 금액 회로차단기 (V2). 열리면 Fallback·프리미엄·core 내부 폴백을 막는다
+        self.budget = _DailyBudget(settings.openai_daily_budget_usd)
+        self._core_fallback_default: bool | None = None
 
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._running: set[str] = set()
@@ -218,6 +252,12 @@ class QueueManager:
 
     # ------------------------------------------------------------------ 수명 주기
     async def start(self) -> None:
+        # 오늘 쓴 OpenAI 금액을 DB에서 이어받는다 (재시작해도 상한이 풀리지 않게)
+        try:
+            self.budget.set(await asyncio.to_thread(self.records.cost_today))
+        except Exception:
+            logger.exception("오늘 OpenAI 금액을 읽지 못함 (0으로 시작)")
+        self._sync_core_fallback()
         # API 모델(Fallback·프리미엄)은 금방 준비되니 먼저 기다리고,
         # 로컬 모델(klein)은 GPU에 올리는 데 오래 걸려서 설정에 따라 뒤에서 불러온다.
         # 다 불러오기 전에 들어온 기본 요청은 primary_not_ready로 Fallback 처리된다.
@@ -285,7 +325,9 @@ class QueueManager:
         결과를 폴링하는 작업. 섹션 5칸이 한꺼번에 들어와 대기가 길어 보여도 비용을 아낀다).
         준비 안 됨·장애 Fallback은 그대로 적용된다.
         """
-        goes_premium = premium and self._usable(self.premium)
+        self._sync_core_fallback()
+        # 금액 상한을 넘으면 "더 정교하게"도 로컬 대기열로 (extra 한도를 넘은 경우와 같음)
+        goes_premium = premium and self._usable(self.premium) and self.api_allowed
         if (
             not goes_premium
             and self._queue.qsize() >= self.settings.queue_max_size
@@ -359,7 +401,7 @@ class QueueManager:
         return job
 
     def _fallback_reason(self, wait_fallback: bool = True) -> str | None:
-        if not self._usable(self.fallback):
+        if not self._usable(self.fallback) or not self.api_allowed:
             return None
         if not self.primary.is_ready:
             return "primary_not_ready"
@@ -372,6 +414,34 @@ class QueueManager:
             # 1건 평균 시간이 길어도(klein 첫 호출 등) 대기 자체는 0이므로 OpenAI로 넘기지 않음
             return "queue_wait"
         return None
+
+    @property
+    def api_allowed(self) -> bool:
+        """OpenAI를 써도 되는지 (금액 회로가 닫혀 있는지)."""
+        return not self.budget.exceeded
+
+    def text_quality(self, requested: str) -> str:
+        """금액 상한을 넘었으면 "더 자연스럽게"(luna)도 로컬 Gemma(basic)로 바꾼다."""
+        return requested if self.api_allowed else "basic"
+
+    def _sync_core_fallback(self) -> None:
+        """금액 상한을 넘으면 core 안의 폴백(klein→flare, Gemma→luna)도 끈다. 자정에 원래대로.
+
+        core는 호출마다 config.USE_FALLBACK을 읽는다. 프로세스 전체 값이라 회로와 같이 움직인다.
+        """
+        from just_make_it import config
+
+        if self._core_fallback_default is None:
+            self._core_fallback_default = config.USE_FALLBACK
+        wanted = self._core_fallback_default and self.api_allowed
+        if config.USE_FALLBACK != wanted:
+            config.USE_FALLBACK = wanted
+            logger.warning(
+                "OpenAI 금액 회로 %s: 오늘 $%.4f / 상한 $%.2f",
+                "닫힘(OpenAI 사용)" if wanted else "열림(OpenAI 막음)",
+                self.budget.spent,
+                self.budget.limit,
+            )
 
     def _jobs_ahead(self) -> int:
         """새 작업 앞에 있는 기본 작업 수 (대기 중 + 실행 중)."""
@@ -512,7 +582,7 @@ class QueueManager:
         if job.cancelled:
             self._fail(job, f"cancelled: {last_error}", ERROR_GENERIC)
             return
-        if self._usable(self.fallback) and self.extra_today.take():
+        if self._usable(self.fallback) and self.api_allowed and self.extra_today.take():
             job.route, job.fallback_reason = "fallback", "primary_error"
             logger.info("장애 Fallback (%s): job=%s", last_error, job.id)
             self._spawn_extra(job, self.fallback)  # type: ignore[arg-type]
@@ -562,6 +632,8 @@ class QueueManager:
         job.model = output.model
         job.prompt = output.prompt
         job.cost_usd = output.cost_usd
+        self.budget.add(output.cost_usd)
+        self._sync_core_fallback()
         # 문구·그림 시간은 core가 단계별로 잰 값. 없으면(mock 등) 호출 전체 시간을 그림으로 본다
         job.text_ms = output.text_ms
         job.image_ms = output.image_ms if output.image_ms is not None else job.run_ms

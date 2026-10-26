@@ -151,7 +151,7 @@ class DetailPageService:
             DetailPageBusyError: 이 사용자의 페이지가 이미 진행 중
             DailyLimitError: 오늘 5칸을 더 만들 수 없음
         """
-        text_quality = (
+        text_quality = self.manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
             else self.settings.generate_text_quality
@@ -312,8 +312,8 @@ class DetailPageService:
                 product_name=stored["product_name"],
                 style=stored.get("style"),
                 image_model=stored.get("image_model", "flux2-klein-4b"),
-                text_quality=stored.get(
-                    "text_quality", self.settings.generate_text_quality
+                text_quality=self.manager.text_quality(
+                    stored.get("text_quality", self.settings.generate_text_quality)
                 ),
             )
             await self.manager.check_capacity(page_input.client_id, 1)

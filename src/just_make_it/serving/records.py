@@ -123,6 +123,17 @@ class GenerationRecords:
     def count_today(self, client_id: str) -> int:
         return db.count_today(client_id)
 
+    def cost_today(self) -> float:
+        """오늘(한국 시간) 생성 기록의 cost_usd 합계. 서버를 다시 켜도 금액 상한이 이어지게."""
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("""SELECT COALESCE(SUM(cost_usd), 0) FROM generations
+                   WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                         '+9 hours', 'start of day', '-9 hours')""").fetchone()
+        finally:
+            conn.close()
+        return float(row[0] or 0)
+
     def seed_of(self, gid: str) -> int | None:
         """결과를 만들 때 쓴 시드 (조금 수정하기에서 구도 유지용). 없으면 None.
 

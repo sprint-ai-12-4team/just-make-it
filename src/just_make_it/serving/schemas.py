@@ -244,6 +244,10 @@ class HealthResponse(BaseModel):
     daily_job_limit: int
     extra_calls_today: int
     extra_daily_limit: int
+    # OpenAI 금액 회로차단기 (오늘 합계, 상한, 열림 = OpenAI 막힘)
+    openai_cost_today_usd: float
+    openai_daily_budget_usd: float
+    openai_blocked: bool
 
 
 @dataclass

@@ -175,6 +175,9 @@ async def health(request: Request) -> HealthResponse:
         daily_job_limit=settings.daily_job_limit,
         extra_calls_today=manager.extra_today.count,
         extra_daily_limit=settings.extra_daily_limit,
+        openai_cost_today_usd=round(manager.budget.spent, 4),
+        openai_daily_budget_usd=settings.openai_daily_budget_usd,
+        openai_blocked=not manager.api_allowed,
     )
 
 
@@ -197,7 +200,7 @@ async def copies(request: Request) -> CopiesResponse:
             payload.product_name,
             payload.message,
             payload.style,
-            TEXT_QUALITY[payload.text_model],
+            _manager(request).text_quality(TEXT_QUALITY[payload.text_model]),
             timeout=settings.copy_timeout_seconds,
         )
     except CopyInputError as exc:
@@ -246,7 +249,7 @@ async def generate(
         style=payload.style,
         adjustments=payload.adjustments,
         reference_image=reference,
-        text_quality=(
+        text_quality=_manager(request).text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
             else settings.generate_text_quality
