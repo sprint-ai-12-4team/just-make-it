@@ -1,5 +1,5 @@
 // ponytail: 서빙(API)이 생기기 전 화면 개발용 가짜 응답. NEXT_PUBLIC_MOCK=1일 때만 사용. 서빙 연결 후 파일째 삭제
-import { SIZES, type DetailInput, type DetailPage, type GenerateInput, type Generation } from "./types";
+import { SIZES, type DetailInput, type DetailPage, type EventType, type FamilyItem, type GenerateInput, type Generation } from "./types";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const load = <T>(k: string): T | null => JSON.parse(sessionStorage.getItem(k) ?? "null");
@@ -36,6 +36,7 @@ export const mock = {
     const g = fakeAd({
       id: crypto.randomUUID(), status: "success", image_url: "", background_url: fakeImage(width, height, hue), hue,
       message, text_layout: { position: "top", font: "jua", size_scale: 1 }, source: "mock", width, height, parent_id, input,
+      created_at: new Date().toISOString(),
     });
     save(`mock_g_${g.id}`, g);
     return g;
@@ -44,6 +45,40 @@ export const mock = {
     const g = load<Generation>(`mock_g_${id}`);
     if (!g) throw Object.assign(new Error("결과를 찾을 수 없어요."), { status: 404 });
     return g;
+  },
+  async logEvent(id: string, type: EventType, detail?: object) {
+    console.info("[mock] event", id, type, detail ?? "");
+    return null;
+  },
+  async saveImage(id: string, image: Blob, _background?: Blob | null, message?: string): Promise<Generation> {
+    await wait(500);
+    const g = await mock.getGeneration(id);
+    // data URL로 바꿔 sessionStorage에 저장 (새로고침해도 고친 그림이 보이게)
+    const url = await new Promise<string>((ok) => {
+      const r = new FileReader();
+      r.onload = () => ok(r.result as string);
+      r.readAsDataURL(image);
+    });
+    const next = { ...g, image_url: url, edited: true, message: message || g.message };
+    save(`mock_g_${id}`, next);
+    return next;
+  },
+  async getFamily(id: string): Promise<FamilyItem[]> {
+    // 실제 서버와 같은 규칙: 맨 처음 결과를 찾고 그 아래 전부
+    const all = Object.keys(sessionStorage).filter((k) => k.startsWith("mock_g_")).map((k) => load<Generation>(k)!);
+    const byId = new Map(all.map((g) => [g.id, g]));
+    if (!byId.has(id)) throw Object.assign(new Error("결과를 찾을 수 없어요."), { status: 404 });
+    let root = id;
+    while (byId.get(root)?.parent_id && byId.has(byId.get(root)!.parent_id!)) root = byId.get(root)!.parent_id!;
+    const ids = new Set([root]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const g of all) if (g.parent_id && ids.has(g.parent_id) && !ids.has(g.id)) (ids.add(g.id), (grew = true));
+    }
+    return all
+      .filter((g) => ids.has(g.id))
+      .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+      .map((g) => ({ id: g.id, parent_id: g.parent_id ?? null, image_url: g.image_url, created_at: g.created_at }));
   },
   async startDetailPage(b: DetailInput) {
     const id = crypto.randomUUID();

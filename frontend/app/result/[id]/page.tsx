@@ -5,12 +5,12 @@ import { Shell } from "@/components/Shell";
 import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, RiskyWords, Waiting } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { save } from "@/lib/draw";
 import { remember } from "@/lib/family";
 import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
 import { ADJUSTMENTS, type Generation, type Purpose } from "@/lib/types";
-import { Check, Download, Eye, EyeOff, History, Link2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
+import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -62,6 +62,9 @@ function ResultPage() {
   const [bgSrc, setBgSrc] = useState("");
   const [showCovered, setShowCovered] = useState(false);
   const [family, setFamily] = useState<{ id: string; img: string }[]>([]);
+  const [familyFromServer, setFamilyFromServer] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploaded, setUploaded] = useState(false);
 
   useEffect(() => {
     setCopies(loadCopies(id));
@@ -70,6 +73,14 @@ function ResultPage() {
       .then((r) => {
         setG(r);
         setFamily(remember(r.id, r.parent_id, r.image_url));
+        // 서버 목록이 있으면 다른 기기에서 만든 것까지. 없으면(404) 이 브라우저 기록 그대로
+        api
+          .getFamily(r.id)
+          .then((items) => {
+            setFamily(items.map((f) => ({ id: f.id, img: f.image_url })));
+            setFamilyFromServer(true);
+          })
+          .catch(() => {});
       })
       .catch((e) => setError(e.message));
   }, [id]);
@@ -81,8 +92,8 @@ function ResultPage() {
     setBusy(true);
     setError("");
     try {
-      // ponytail: 원본 사진은 조회 응답에 없어 다시 만들 때 빠짐. 서버가 parent_id로 원본 사진을 재사용하면 해결
-      // 직접 고친 문구를 이어 씀. g.input.message는 처음 입력값
+      // 원본 사진은 서버가 parent_id로 다시 씀. 직접 고친 문구를 이어 씀 (g.input.message는 처음 입력값)
+      api.logEvent(g.id, "remake", { adjustments });
       const message = edit?.text.trim() || g.message;
       const next = await api.generate({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
       saveCopies(next.id, copies);
@@ -95,8 +106,30 @@ function ResultPage() {
 
   async function copyLink() {
     await navigator.clipboard.writeText(location.href);
+    api.logEvent(id, "copy_link");
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  /** 고친 그림을 서버에 올려 링크로 연 사람도 같은 그림을 보게 함 */
+  async function upload() {
+    const canvas = canvasRef.current;
+    if (!g || !edit || !canvas) return;
+    setUploading(true);
+    setError("");
+    try {
+      const image = await new Promise<Blob>((ok, no) => canvas.toBlob((b) => (b ? ok(b) : no(new Error("사진을 만들지 못했어요. 다시 해 주세요."))), "image/png"));
+      const background = bgSrc ? await fetch(bgSrc).then((r) => r.blob()) : null;
+      setG(await api.saveImage(g.id, image, background, edit.text.trim()));
+      setEdit(null);
+      if (bgSrc) URL.revokeObjectURL(bgSrc);
+      setBgSrc("");
+      setUploaded(true);
+    } catch (e) {
+      setError(e instanceof ApiError && e.status === 404 ? "아직 링크에 저장할 수 없어요. 내 기기에 저장해서 써 주세요." : (e as Error).message);
+    } finally {
+      setUploading(false);
+    }
   }
 
   if (busy) return <Waiting title="새로 만들고 있어요" hint="보통 10~30초 걸려요. 이 화면을 닫지 말아 주세요." />;
@@ -130,6 +163,7 @@ function ResultPage() {
             setBgSrc(URL.createObjectURL(file));
             setCutout(false);
             if (!edit) startEdit(g); // 지운 그림 위에 글자를 다시 얹어 보여 줌
+            api.logEvent(g.id, "cutout");
           }}
           onCancel={() => setCutout(false)}
         />
@@ -179,12 +213,16 @@ function ResultPage() {
         <>
           <div className="grid gap-3 sm:grid-cols-2">
             {edit ? (
-              <button type="button" className="btn-fill" onClick={() => save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError)}>
+              <button
+                type="button"
+                className="btn-fill"
+                onClick={() => (save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError), api.logEvent(g.id, "download", { edited: true }))}
+              >
                 <Download aria-hidden className="size-5" /> 내 기기에 저장
               </button>
             ) : (
               // 프록시 덕분에 같은 출처라 download 속성이 동작
-              <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`}>
+              <a className="btn-fill" href={g.image_url} download={`광고-${g.message.slice(0, 10)}.png`} onClick={() => api.logEvent(g.id, "download", { edited: !!g.edited })}>
                 <Download aria-hidden className="size-5" /> 내 기기에 저장
               </a>
             )}
@@ -194,6 +232,21 @@ function ResultPage() {
             </button>
           </div>
 
+          {edit && (
+            <div className="flex flex-col gap-2">
+              <button type="button" className="btn-line" disabled={uploading} onClick={upload}>
+                {uploading ? <Loader2 aria-hidden className="size-5 animate-spin" /> : <CloudUpload aria-hidden className="size-5" />}
+                {uploading ? "저장하는 중" : "고친 그림을 링크에도 저장"}
+              </button>
+              <p className="hint">저장하면 링크를 받은 사람도 고친 그림을 봐요.</p>
+            </div>
+          )}
+          {uploaded && !edit && (
+            <p role="status" className="-mt-4 hint">
+              고친 그림을 저장했어요. 이제 링크로도 이 그림이 보여요.
+            </p>
+          )}
+
           {error && <Notice>{error}</Notice>}
 
           {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
@@ -201,7 +254,7 @@ function ResultPage() {
             (edit ? (
               <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
             ) : (
-              <button type="button" className="btn-line" onClick={() => startEdit(g)}>
+              <button type="button" className="btn-line" onClick={() => (startEdit(g), api.logEvent(g.id, "edit_text"))}>
                 <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
               </button>
             ))}
@@ -244,7 +297,7 @@ function ResultPage() {
       {family.length > 1 && (
         <section className="card flex flex-col gap-4">
           <h2 className="text-h-sm font-bold">같은 원본에서 만든 결과</h2>
-          <p className="-mt-2 hint">이 브라우저에서 만든 것만 보여요. 눌러서 그 결과로 돌아갈 수 있어요.</p>
+          <p className="-mt-2 hint">{familyFromServer ? "" : "이 브라우저에서 만든 것만 보여요. "}눌러서 그 결과로 돌아갈 수 있어요.</p>
           <ul className="grid grid-cols-3 gap-3 sm:grid-cols-4">
             {family.map((f, i) => (
               <li key={f.id}>

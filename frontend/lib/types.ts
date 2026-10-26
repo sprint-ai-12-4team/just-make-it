@@ -36,7 +36,19 @@ export interface Generation {
   width: number;
   height: number;
   parent_id?: string | null;
+  created_at?: string;
+  edited?: boolean; // 브라우저에서 고친 그림을 서버에 저장했으면 true
   input?: Omit<GenerateInput, "parent_id">;
+}
+
+/** 사용 기록 종류 (docs/api_spec_next.md 1장) */
+export type EventType = "download" | "copy_link" | "remake" | "edit_text" | "cutout" | "pick_copy";
+
+export interface FamilyItem {
+  id: string;
+  parent_id: string | null;
+  image_url: string;
+  created_at?: string;
 }
 
 export interface DetailInput {

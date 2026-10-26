@@ -86,6 +86,8 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
           photo,
         );
         saveCopies(g.id, copies);
+        const picked = copies.indexOf(message.trim());
+        if (picked >= 0) api.logEvent(g.id, "pick_copy", { index: picked, copy: copies[picked] });
         router.push(`/result/${g.id}`);
       }
     } catch (e) {

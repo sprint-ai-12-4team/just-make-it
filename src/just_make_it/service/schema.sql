@@ -68,3 +68,16 @@ CREATE INDEX IF NOT EXISTS idx_generations_client
 -- [추가] 서버 시작 시 정리 쿼리가 빨리 찾도록 (processing인 행만 인덱스)
 CREATE INDEX IF NOT EXISTS idx_generations_processing
     ON generations (status) WHERE status = 'processing';
+-- 사용 기록 (docs/api_spec_next.md 1장). 채택률 지표 + 다음 학습용 선호 데이터
+-- type 값 검사는 db.EVENT_TYPES (SQLite는 CHECK를 바꾸려면 테이블을 새로 만들어야 해서)
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY,
+    generation_id TEXT NOT NULL REFERENCES generations(id),
+    client_id     TEXT NOT NULL,
+    type          TEXT NOT NULL,
+    detail_json   TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_generation
+    ON events (generation_id, type);
