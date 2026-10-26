@@ -104,15 +104,27 @@ def check(what: str = "작업") -> None:
 def openai_client(client, what: str = "OpenAI"):
     """Deadline이 걸려 있으면 남은 시간만 기다리고 재시도하지 않는 OpenAI 클라이언트.
 
-    OpenAI SDK 기본값은 응답을 600초까지 기다리고 실패하면 2번 다시 시도해서,
-    서빙이 포기한 뒤에도 몇 분씩 호출이 이어지고 비용이 나갑니다.
+    클라이언트에 설정된 호출 상한(config.OPENAI_*_TIMEOUT)은 그대로 지키고, 남은 시간이
+    더 짧으면 그만큼만 기다린다. 재시도는 서빙이 정하므로 여기서는 하지 않는다
+    (재시도 1번이면 상한의 두 배까지 호출이 이어져 서빙 제한을 넘김).
 
     Raises:
         DeadlineExceeded: 이미 시간이 다 됐거나 취소됐을 때
     """
     if current() is None:
         return client
-    return client.with_options(timeout=timeout_for(600.0, what), max_retries=0)
+    return client.with_options(
+        timeout=timeout_for(_seconds(getattr(client, "timeout", None)), what),
+        max_retries=0,
+    )
+
+
+def _seconds(timeout) -> float:
+    """OpenAI 클라이언트의 timeout(숫자 또는 httpx.Timeout)을 초로. 모르면 SDK 기본 600초."""
+    if isinstance(timeout, int | float):
+        return float(timeout)
+    read = getattr(timeout, "read", None)
+    return float(read) if isinstance(read, int | float) else 600.0
 
 
 def step_callback(what: str = "이미지 생성"):

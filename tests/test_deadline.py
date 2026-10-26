@@ -88,7 +88,10 @@ def klein_with(pipe) -> KleinImageModel:
     model = object.__new__(KleinImageModel)
     model.model, model.pipe, model.lock = "klein", pipe, threading.Lock()
     generator = SimpleNamespace(manual_seed=lambda seed: None)
-    model.torch = SimpleNamespace(Generator=lambda device: generator)
+    model.torch = SimpleNamespace(
+        Generator=lambda device: generator,
+        cuda=SimpleNamespace(empty_cache=lambda: None),
+    )
     return model
 
 
@@ -313,3 +316,12 @@ def test_copies_timeout_stops_text_model(tmp_path):
         wait_until(lambda: stopped)
     assert res.status_code == 503
     assert stopped[0] < 1.0
+
+
+def test_configured_openai_cap_still_applies():
+    # core 설정의 호출 상한(OPENAI_IMAGE_TIMEOUT 등)보다 오래 기다리지 않는다
+    client = FakeOpenAI()
+    client.timeout = 75.0
+    with use_deadline(Deadline(300)):
+        flare_with(client).generate("a cake", 64, 64)
+    assert client.log[-1] == {"timeout": 75.0, "max_retries": 0}
