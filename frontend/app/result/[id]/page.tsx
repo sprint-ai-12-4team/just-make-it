@@ -3,15 +3,31 @@
 import { CutoutEditor } from "@/components/CutoutEditor";
 import { Shell } from "@/components/Shell";
 import { TextCanvas } from "@/components/TextCanvas";
-import { Chip, Notice, Waiting } from "@/components/ui";
+import { Chip, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { save } from "@/lib/draw";
 import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
-import { ADJUSTMENTS, type Generation } from "@/lib/types";
-import { Check, Download, Link2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
+import { ADJUSTMENTS, type Generation, type Purpose } from "@/lib/types";
+import { Check, Download, Eye, EyeOff, History, Link2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+
+// 올린 뒤 화면에서 가려지거나 잘리는 곳 (그림 크기 대비 %)
+// ponytail: 대략값. 인스타 프로필 격자는 3:4로 보여 1:1 그림의 양옆이 잘림, 유튜브는 오른쪽 아래에 영상 길이
+const COVERED: Partial<Record<Purpose, { label: string; boxes: { left: number; top: number; width: number; height: number }[] }>> = {
+  instagram: {
+    label: "프로필 격자에서는 양옆이 잘려 보여요",
+    boxes: [
+      { left: 0, top: 0, width: 12.5, height: 100 },
+      { left: 87.5, top: 0, width: 12.5, height: 100 },
+    ],
+  },
+  youtube: {
+    label: "오른쪽 아래는 영상 길이 표시에 가려요",
+    boxes: [{ left: 86, top: 86, width: 12, height: 10 }],
+  },
+};
 
 export default function Page() {
   return (
@@ -36,6 +52,7 @@ function ResultPage() {
   const [cutout, setCutout] = useState(false);
   // 배경을 지우고 다시 채운 그림 (이 브라우저에만). 비어 있으면 서버의 background_url
   const [bgSrc, setBgSrc] = useState("");
+  const [showCovered, setShowCovered] = useState(false);
 
   useEffect(() => {
     setCopies(loadCopies(id));
@@ -88,10 +105,13 @@ function ResultPage() {
       <div aria-busy className="aspect-square animate-pulse rounded-card bg-mist" />
     );
 
+  const covered = g.input ? COVERED[g.input.purpose] : undefined;
+
   return (
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
+      <div className="relative">
       {cutout && g.background_url ? (
         <CutoutEditor
           photoUrl={g.background_url}
@@ -111,6 +131,27 @@ function ResultPage() {
         <div className="overflow-hidden rounded-card bg-mist shadow-sm">
           {/* eslint-disable-next-line @next/next/no-img-element -- 서버가 만든 최종 이미지 그대로 (프록시 경유) */}
           <img src={g.image_url} alt={g.message} width={g.width} height={g.height} className="block h-auto w-full" />
+        </div>
+      )}
+        {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
+        {showCovered && !cutout &&
+          covered?.boxes.map((b, i) => (
+            <div
+              key={i}
+              aria-hidden
+              className="pointer-events-none absolute bg-ink/50"
+              style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }}
+            />
+          ))}
+      </div>
+
+      {covered && !cutout && (
+        <div className="-mt-4 flex flex-wrap items-center gap-3">
+          <button type="button" className="btn-line" aria-pressed={showCovered} onClick={() => setShowCovered(!showCovered)}>
+            {showCovered ? <EyeOff aria-hidden className="size-5" /> : <Eye aria-hidden className="size-5" />}
+            {showCovered ? "가려지는 곳 숨기기" : "올리면 가려지는 곳 보기"}
+          </button>
+          {showCovered && <p className="hint">{covered.label}</p>}
         </div>
       )}
 
@@ -176,6 +217,11 @@ function ResultPage() {
         </div>
       </section>
 
+      {g.parent_id && (
+        <Link href={`/result/${g.parent_id}`} className="btn-line">
+          <History aria-hidden className="size-5" /> 바로 전 결과로 돌아가기
+        </Link>
+      )}
       <Link href="/" className="btn-line">처음부터 새로 만들기</Link>
     </div>
   );
@@ -198,6 +244,7 @@ function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
       <div>
         <label htmlFor="t" className="label">문구</label>
         <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
+        <RiskyWords text={state.text} />
         {copies.length > 0 && (
           <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
             {copies.map((c) => (
