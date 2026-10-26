@@ -31,7 +31,7 @@ export function StickyPreview({ slides }: { slides: Slide[] }) {
       {slides.length > 1 && (
         <div className="mt-2 flex justify-center gap-2">
           {slides.map((s, i) => (
-            <button key={s.label} type="button" aria-pressed={i === at} onClick={() => go(i)} className={clsx("chip min-h-[36px] px-3", i === at && "chip-on")}>
+            <button key={s.label} type="button" aria-pressed={i === at} onClick={() => go(i)} className={clsx("chip", i === at && "chip-on")}>
               {s.label}
             </button>
           ))}
