@@ -237,6 +237,8 @@ class QueueManager:
 
         self.concurrency = max(1, settings.primary_concurrency)
         self.seconds_per_job = settings.seconds_per_job_init
+        # Fallback·프리미엄(OpenAI) 1건 시간. 진행 상황의 남은 시간 추정에만 쓴다
+        self.extra_seconds_per_job = settings.seconds_per_job_init
         self.jobs_today = _DailyCounter(settings.daily_job_limit)
         self.extra_today = _DailyCounter(settings.extra_daily_limit)
         # OpenAI 금액 회로차단기 (V2). 열리면 Fallback·프리미엄·core 내부 폴백을 막는다
@@ -245,6 +247,8 @@ class QueueManager:
 
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._running: set[str] = set()
+        # 아직 안 끝난 작업 (진행 상황 조회용). 끝나면 지운다 (결과는 DB에)
+        self._active: dict[str, Job] = {}
         self._workers: list[asyncio.Task] = []
         self._loading: asyncio.Task | None = None
         self._extra_tasks: set[asyncio.Task] = set()
@@ -373,7 +377,7 @@ class QueueManager:
                 await asyncio.to_thread(
                     self.records.save_reference, gid, spec.reference_image
                 )
-            return Job(
+            job = Job(
                 id=gid,
                 spec=spec,
                 route=route,
@@ -383,6 +387,8 @@ class QueueManager:
                 section_index=section_index,
                 fallback_reason=reason,
             )
+            self._active[gid] = job
+            return job
 
         if goes_premium and self.extra_today.take():
             job = await new_job("premium", self.premium)  # type: ignore[arg-type]
@@ -477,6 +483,42 @@ class QueueManager:
     def estimated_wait_for_new_job(self) -> float:
         """지금 접수하는 기본 작업이 끝날 때까지의 예상 시간(초)."""
         return self._wait_for(self._jobs_ahead())
+
+    def progress(self, gid: str) -> dict | None:
+        """만드는 중인 작업의 진행 상황 (V3). 끝났거나 모르는 작업이면 None.
+
+        stage: queued / running, jobs_ahead: 먼저 처리될 작업 수, estimated_seconds: 남은 예상 시간
+        """
+        job = self._active.get(gid)
+        if job is None or job.is_finished or job.cancelled:
+            return None
+        now = time.monotonic()
+        extra = job.route != "primary"
+        per_job = self.extra_seconds_per_job if extra else self.seconds_per_job
+        if job.state == JobState.RUNNING and job.started_mono is not None:
+            left = max(1.0, per_job - (now - job.started_mono))
+            return {
+                "stage": "running",
+                "jobs_ahead": 0,
+                "estimated_seconds": round(left, 1),
+            }
+        if extra:
+            # OpenAI 자리를 기다리는 중 (동시 EXTRA_CONCURRENCY개)
+            return {
+                "stage": "queued",
+                "jobs_ahead": 0,
+                "estimated_seconds": round(per_job, 1),
+            }
+        waiting = [
+            j for j in list(self._queue._queue) if not j.cancelled
+        ]  # asyncio.Queue 안의 순서
+        position = next((i for i, j in enumerate(waiting) if j is job), len(waiting))
+        ahead = position + len(self._running)
+        return {
+            "stage": "queued",
+            "jobs_ahead": ahead,
+            "estimated_seconds": self._wait_for(ahead),
+        }
 
     def cancel(self, job: Job, reason: str) -> None:
         """작업을 취소한다. 대기 중이면 건너뛰고, 실행 중이면 core가 멈추게 한다.
@@ -602,6 +644,7 @@ class QueueManager:
             job.state = JobState.RUNNING
             if job.started_mono is None:
                 job.started_mono = time.monotonic()
+            call_started = time.monotonic()
             try:
                 output = await self._call(generator, job)
             except TimeoutError:
@@ -622,6 +665,10 @@ class QueueManager:
             except Exception as exc:
                 self._fail(job, repr(exc), ERROR_GENERIC)
                 return
+            elapsed = time.monotonic() - call_started
+            self.extra_seconds_per_job = (
+                0.7 * self.extra_seconds_per_job + 0.3 * elapsed
+            )
             await self._finish(job, output, generator)
 
     async def _finish(
@@ -658,6 +705,7 @@ class QueueManager:
             self._fail(job, f"결과 저장 실패: {exc!r}", ERROR_GENERIC)
             return
         job.state = JobState.SUCCEEDED
+        self._active.pop(job.id, None)
         job.done.set()
         self._log(job, generator)
 
@@ -676,6 +724,7 @@ class QueueManager:
         job.error_internal = internal_error
         job.input_error = input_error
         job.state = JobState.FAILED
+        self._active.pop(job.id, None)
         job.finished_mono = job.finished_mono or time.monotonic()
         try:
             self.records.fail(job.id, internal_error)

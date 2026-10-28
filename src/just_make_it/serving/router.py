@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 
-from fastapi import APIRouter, Header, HTTPException, Path, Request
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
@@ -27,6 +27,7 @@ from .queue_manager import (
 )
 from .records import GenerationRecords
 from .schemas import (
+    EVENT_DETAIL_MAX_BYTES,
     IMAGE_QUALITY,
     TEXT_QUALITY,
     CopiesRequest,
@@ -34,14 +35,18 @@ from .schemas import (
     DetailPageRequest,
     DetailPageResponse,
     DetailPageStarted,
+    EventRequest,
+    FamilyResponse,
     GenerateRequest,
     GenerateSuccessResponse,
     GenerationResponse,
     GenerationSpec,
+    GenerationStarted,
     HealthResponse,
     JobState,
     SectionRegenerateRequest,
     SectionRegenerateStarted,
+    StatsResponse,
     TextEditRequest,
 )
 from .settings import ServingSettings
@@ -62,10 +67,12 @@ MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
 MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
 MSG_DETAIL_BUSY = "만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요."
 MSG_SECTION_BUSY = "아직 만들고 있어요. 다 만든 뒤에 다시 시도해 주세요."
-MSG_EDIT_SIZE = "이미지 비율이 원본과 달라요. 결과 화면에서 다시 저장해 주세요."
+MSG_EDIT_SIZE = "그림 크기가 원래 결과({width}×{height})와 달라요. 결과 화면에서 다시 저장해 주세요."
+MSG_EDIT_FORMAT = "고친 그림은 PNG 파일만 저장할 수 있어요."
 MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 고쳐 주세요."
 MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
+MSG_EVENT_BAD = "기록할 수 없는 요청이에요."
 
 
 def _json_body_doc(model, example: dict) -> dict:
@@ -235,14 +242,68 @@ async def generate(
       얹은 위치·글꼴·크기(`text_layout`)를 함께 준다. 글자만 고칠 때는 `POST /generations/{id}/text`
     - `image_model`: `flux2-klein-4b`(빠르게, 로컬 GPU 대기열) /
       `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
-    - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록). 프론트는 폴링하지 않는다
+    - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록)
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
+    - 기다리는 동안 진행 상황을 보여주려면 같은 본문으로 `POST /generations`(202 + 조회)를 쓴다
     """
+    settings = _settings(request)
+    manager = _manager(request)
+    job = await _submit_generation(request, x_client_id)
+    if not await manager.wait(job, settings.generate_wait_seconds):
+        # 동기 응답은 프론트가 이 결과를 폴링하지 않아 끝까지 만들어도 아무도 못 본다 → 작업도 멈춘다
+        # (대기 중이면 건너뛰고, 실행 중이면 core의 OpenAI·klein 호출을 끊음)
+        manager.cancel(job, "generate_wait_timeout")
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC)
+    if job.state == JobState.FAILED:
+        status_code = 400 if job.input_error else 503
+        return JSONResponse(status_code=status_code, content={"detail": job.error})
+    return GenerateSuccessResponse.model_validate(job.result)
+
+
+@router.post(
+    "/generations",
+    status_code=202,
+    response_model=GenerationStarted,
+    responses={
+        400: {"description": "필수값 누락"},
+        413: {"description": "사진 10MB 초과"},
+        415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
+        429: {"description": "하루 생성 한도 초과"},
+        503: {"description": "요청 과다 (대기열 가득 참)"},
+    },
+    openapi_extra={"requestBody": _form_body_doc(GenerateRequest, GENERATE_EXAMPLE)},
+)
+async def start_generation(
+    request: Request,
+    x_client_id: str | None = Header(default=None),
+) -> GenerationStarted:
+    """광고 이미지 생성을 시작한다. **비동기 (202)**, V3.
+
+    - 본문·검사·라우팅은 `POST /generate`와 같다. 기다리지 않고 바로 `id`와 문구를 돌려준다
+    - 프론트는 문구를 먼저 보여주고 `GET /generations/{id}`를 2초마다 조회한다
+      (`progress`: 대기 순서·남은 예상 시간). `status`가 `success`·`error`가 되면 멈춘다
+    - 동기 `/generate`와 달리 응답을 기다리다 작업을 취소하지 않는다 (나중에 조회해도 결과가 있음)
+    """
+    job = await _submit_generation(request, x_client_id)
+    progress = _manager(request).progress(job.id)
+    width, height = _image_size(job.spec.purpose)
+    return GenerationStarted(
+        id=job.id,
+        message=job.spec.message,
+        width=width,
+        height=height,
+        estimated_seconds=progress["estimated_seconds"] if progress else 0.0,
+    )
+
+
+async def _submit_generation(request: Request, x_client_id: str | None):
+    """/generate와 /generations 공통: 본문 검사 → 대기열 접수. 접수한 작업을 돌려준다."""
     settings = _settings(request)
     body, reference = await _parse_form_body(request, settings)
     payload = _validate(GenerateRequest, body)
     _check_lengths(payload, settings)
 
+    manager = _manager(request)
     spec = GenerationSpec(
         product_name=payload.product_name,
         message=payload.message,
@@ -250,7 +311,7 @@ async def generate(
         style=payload.style,
         adjustments=payload.adjustments,
         reference_image=reference,
-        text_quality=_manager(request).text_quality(
+        text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
             else settings.generate_text_quality
@@ -258,10 +319,8 @@ async def generate(
     )
     # "더 정교하게"(OpenAI)는 로컬 GPU 대기열을 거치지 않는 프리미엄 경로로 보낸다
     use_api_model = IMAGE_QUALITY[payload.image_model] == "detailed"
-
-    manager = _manager(request)
     try:
-        job = await manager.submit(
+        return await manager.submit(
             spec,
             premium=use_api_model,
             client_id=_client_id(x_client_id),
@@ -272,15 +331,11 @@ async def generate(
     except DailyLimitError as exc:
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
 
-    if not await manager.wait(job, settings.generate_wait_seconds):
-        # 프론트는 /generate를 폴링하지 않아 끝까지 만들어도 아무도 못 본다 → 작업도 멈춘다
-        # (대기 중이면 건너뛰고, 실행 중이면 core의 OpenAI·klein 호출을 끊음)
-        manager.cancel(job, "generate_wait_timeout")
-        raise HTTPException(status_code=503, detail=ERROR_GENERIC)
-    if job.state == JobState.FAILED:
-        status_code = 400 if job.input_error else 503
-        return JSONResponse(status_code=status_code, content={"detail": job.error})
-    return GenerateSuccessResponse.model_validate(job.result)
+
+def _image_size(purpose: str) -> tuple[int, int]:
+    from just_make_it.core.prompt_builder import get_image_size
+
+    return get_image_size(purpose)
 
 
 # ---------------------------------------------------------------------- /generations
@@ -290,11 +345,117 @@ async def generate(
     responses={404: {"description": "없는 결과 id"}},
 )
 async def get_generation(request: Request, generation_id: str) -> GenerationResponse:
-    """생성 결과를 다시 조회한다 (결과 화면 새로고침, 링크 공유). DB에 영구 보관."""
+    """생성 결과를 다시 조회한다 (결과 화면 새로고침, 링크 공유, 비동기 생성 폴링). DB에 영구 보관.
+
+    `processing`이면 `progress`(대기 순서·남은 예상 시간)를 함께 준다.
+    """
     record = await asyncio.to_thread(_records(request).get, generation_id)
     if record is None:
         raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    if record["status"] == "processing":
+        record = {**record, "progress": _manager(request).progress(generation_id)}
     return GenerationResponse.model_validate(record)
+
+
+@router.get(
+    "/generations/{generation_id}/family",
+    response_model=FamilyResponse,
+    responses={404: {"description": "없는 결과 id (상세페이지 섹션 id 포함)"}},
+)
+async def get_family(request: Request, generation_id: str) -> FamilyResponse:
+    """같은 원본에서 다시 만든 결과 목록 (api_spec_next 3, S2). 만든 순서.
+
+    - `parent_id`를 거슬러 맨 처음 결과를 찾고 그 아래 모든 결과를 준다
+    - 성공한 결과만, 최대 50개. 상세페이지 섹션은 제외. 혼자인 결과도 자기 1개가 온다
+    """
+    items = await asyncio.to_thread(_records(request).family, generation_id, 50)
+    if items is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    return FamilyResponse(items=items)
+
+
+@router.post(
+    "/events",
+    status_code=204,
+    responses={
+        400: {"description": "모르는 type, 없는 generation_id, detail 4KB 초과"}
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            EventRequest,
+            {
+                "generation_id": "6f1c2b0e-...",
+                "type": "download",
+                "detail": {"edited": False},
+            },
+        )
+    },
+)
+async def add_event(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> Response:
+    """사용 기록 (api_spec_next 1, S4). 채택률 지표·다음 학습용 선호 데이터.
+
+    - `type`: `download` 다운로드 · `copy_link` 링크 복사 · `remake` 다시 만들기 ·
+      `edit_text` 글자 직접 고치기 시작 · `cutout` 배경 지우고 색 채우기 완료 · `pick_copy` 추천 문구 고름
+    - `detail`: 추가 정보 (자유 형식, 4KB 이하). 누를 때마다 1건씩 쌓인다
+    - `download`·`copy_link`이면 결과의 첫 다운로드 시각도 남긴다. 일일 생성 한도에 세지 않음
+    - 화면 동작과 무관하므로 프론트는 실패해도 무시하면 된다
+    """
+    body = await _read_json(request)
+    try:
+        payload = EventRequest.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=MSG_EVENT_BAD) from exc
+    if payload.detail is not None:
+        size = len(json.dumps(payload.detail, ensure_ascii=False).encode())
+        if size > EVENT_DETAIL_MAX_BYTES:
+            raise HTTPException(status_code=400, detail=MSG_EVENT_BAD)
+    added = await asyncio.to_thread(
+        _records(request).add_event,
+        payload.generation_id,
+        _client_id(x_client_id),
+        payload.type,
+        payload.detail,
+    )
+    if not added:
+        raise HTTPException(status_code=400, detail=MSG_EVENT_BAD)
+    return Response(status_code=204)
+
+
+@router.get("/stats", response_model=StatsResponse)
+async def stats(
+    request: Request, days: int = Query(default=7, ge=1, le=90)
+) -> StatsResponse:
+    """최근 `days`일(한국 날짜) 사용 지표 (S4, 발표용 채택률). 단일 이미지 결과만 (상세페이지 칸 제외).
+
+    - `generated` 성공한 결과 수, `downloaded` 다운로드·링크 복사된 수,
+      `edited` 글자 직접 고치기·배경 지우기를 한 수, `remade` 다시 만들기·조금 수정하기의 원본이 된 수
+    - `*_rate`는 generated 대비 비율
+    """
+    rows = await asyncio.to_thread(_records(request).adoption_stats, days)
+    daily = [_with_rates(row["day"], row) for row in rows]
+    keys = ("generated", "downloaded", "edited", "remade")
+    total = _with_rates("total", {k: sum(row[k] for row in rows) for k in keys})
+    return StatsResponse(days=daily, total=total)
+
+
+def _with_rates(day: str, row: dict) -> dict:
+    generated = row["generated"] or 0
+
+    def rate(key: str) -> float:
+        return round((row[key] or 0) / generated, 3) if generated else 0.0
+
+    return {
+        "date": day,
+        "generated": generated,
+        "downloaded": row["downloaded"] or 0,
+        "edited": row["edited"] or 0,
+        "remade": row["remade"] or 0,
+        "download_rate": rate("downloaded"),
+        "edit_rate": rate("edited"),
+        "remake_rate": rate("remade"),
+    }
 
 
 @router.post(
@@ -388,11 +549,12 @@ def _render_text(background, message, style, size_scale, position, font):
     "/generations/{generation_id}/image",
     response_model=GenerationResponse,
     responses={
+        400: {"description": "그림 크기가 원래 결과와 다름"},
         404: {"description": "없는 결과 id"},
         409: {"description": "아직 processing·error인 결과"},
-        413: {"description": "이미지 10MB 초과"},
-        415: {"description": "PNG·JPG·WEBP가 아닌 이미지"},
-        422: {"description": "이미지 없음, 원본과 비율이 다름, 문구가 너무 김"},
+        413: {"description": "그림 10MB 초과"},
+        415: {"description": "PNG가 아닌 그림"},
+        422: {"description": "image 없음, 문구가 너무 김"},
     },
     openapi_extra={
         "requestBody": {
@@ -405,11 +567,16 @@ def _render_text(background, message, style, size_scale, position, font):
                             "image": {
                                 "type": "string",
                                 "format": "binary",
-                                "description": "프론트에서 글자를 고쳐 그린 최종 이미지 (원본과 같은 비율)",
+                                "description": "글자까지 얹은 최종 그림. PNG, 원래 결과와 같은 크기",
+                            },
+                            "background": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "글자 없는 그림 (배경을 지웠을 때). 보내면 background_url도 바뀜",
                             },
                             "message": {
                                 "type": "string",
-                                "description": "이미지에 얹은 문구 (비우면 지금 문구 유지)",
+                                "description": "그림에 얹은 문구 (보내면 응답 message가 바뀜)",
                             },
                         },
                         "required": ["image"],
@@ -420,23 +587,28 @@ def _render_text(background, message, style, size_scale, position, font):
     },
 )
 async def save_edited_image(request: Request, generation_id: str) -> GenerationResponse:
-    """프론트에서 직접 고친 결과 이미지를 서버에 저장한다 (S7, 재생성 없음).
+    """브라우저에서 고친 그림을 서버에 저장한다 (api_spec_next 2, S7). 재생성 없음.
 
-    - "글자 직접 고치기"로 canvas에 그린 이미지를 올리면 `image_url`이 그 이미지로 바뀐다
-      → 링크 공유·다시 조회해도 고친 결과가 보인다. 일일 생성 한도에 세지 않음
-    - 글자 없는 원본(`background_url`)은 그대로라 다시 고칠 수 있다
-    - 응답 `image_url`은 새 주소 (브라우저 캐시 회피). 처음 결과 파일은 예전 링크용으로 남김
+    - 배경 지우기·글자 직접 고치기 결과를 올리면 `image_url`이 그 그림으로 바뀐다
+      → 링크 공유·다시 조회해도 고친 그림이 보인다. 응답·조회에 `edited: true`
+    - `background`(글자 없는 그림)를 보내면 `background_url`도 바뀌어,
+      이후 `POST /generations/{id}/text`가 지운 배경 위에 글자를 얹는다
+    - 응답 `image_url`은 새 주소 (캐시 회피). 처음 결과 파일은 예전 링크용으로 남김
+    - 일일 생성 한도에 세지 않음
     """
     settings = _settings(request)
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("multipart/form-data"):
         raise HTTPException(
-            status_code=422, detail="이미지는 multipart/form-data로 보내 주세요."
+            status_code=422, detail="그림은 multipart/form-data로 보내 주세요."
         )
     form = await request.form()
     upload = form.get("image")
     if not isinstance(upload, UploadFile) or not upload.filename:
-        raise HTTPException(status_code=422, detail="저장할 이미지가 없어요.")
+        raise HTTPException(status_code=422, detail="저장할 그림이 없어요.")
+    background_upload = form.get("background")
+    if not isinstance(background_upload, UploadFile) or not background_upload.filename:
+        background_upload = None
     message = form.get("message")
     message = message.strip() if isinstance(message, str) else ""
     if len(message) > settings.max_message_chars:
@@ -452,23 +624,26 @@ async def save_edited_image(request: Request, generation_id: str) -> GenerationR
     if record["status"] != "success":
         raise HTTPException(status_code=409, detail=MSG_TEXT_NOT_READY)
 
-    image = await _read_edited_image(upload, settings, record)
+    image = await _read_edited_png(upload, settings, record)
+    background = (
+        await _read_edited_png(background_upload, settings, record)
+        if background_upload is not None
+        else None
+    )
     updated = await asyncio.to_thread(
-        records.update_text,
+        records.replace_image,
         generation_id,
         image,
-        message=message or record["message"],
-        # 프론트 canvas는 자유 위치·스타일이라 서버 text_layout과 모양이 다르다.
-        # 서버 글자 고치기(/text)의 처음 값으로 쓰이도록 지금 값을 그대로 둔다
-        text_layout=record.get("text_layout"),
+        background=background,
+        message=message or None,
     )
     return GenerationResponse.model_validate(updated)
 
 
-async def _read_edited_image(
+async def _read_edited_png(
     upload: UploadFile, settings: ServingSettings, record: dict
 ) -> bytes:
-    """올린 이미지를 검사하고 PNG로 바꾼다. 원본과 비율이 다르면 422 (다른 그림으로 바꿔치기 방지)."""
+    """올린 그림 검사: PNG만(415), 10MB 이하(413), 원래 결과와 같은 크기(400). 바이트 그대로 저장."""
     data = await upload.read(settings.max_upload_bytes + 1)
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail=MSG_TOO_LARGE)
@@ -477,20 +652,15 @@ async def _read_edited_image(
         image_format = image.format
         image.load()
     except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT) from exc
-    if image_format not in ALLOWED_REFERENCE_FORMATS:
-        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT)
-
+        raise HTTPException(status_code=415, detail=MSG_EDIT_FORMAT) from exc
+    if image_format != "PNG":
+        raise HTTPException(status_code=415, detail=MSG_EDIT_FORMAT)
     width, height = record.get("width"), record.get("height")
-    if width and height and abs(image.width / image.height - width / height) > 0.01:
-        raise HTTPException(status_code=422, detail=MSG_EDIT_SIZE)
-    image = image.convert("RGB")
     if width and height and image.size != (width, height):
-        # 화면 배율로 그린 canvas도 원본 크기로 맞춰 저장 (다운로드·공유 결과를 같게)
-        image = image.resize((width, height), Image.LANCZOS)
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
+        raise HTTPException(
+            status_code=400, detail=MSG_EDIT_SIZE.format(width=width, height=height)
+        )
+    return data
 
 
 # ---------------------------------------------------------------------- /detail-pages

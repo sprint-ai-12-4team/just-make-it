@@ -133,6 +133,17 @@ class GenerationInput(BaseModel):
     adjustments: list[str] = Field(default_factory=list)
 
 
+class GenerationProgress(BaseModel):
+    """만드는 중인 결과의 진행 상황 (V3). 서버가 메모리에 들고 있는 작업만 알 수 있다."""
+
+    # queued: 차례를 기다리는 중, running: 만드는 중
+    stage: Literal["queued", "running"]
+    # 이 작업보다 먼저 처리될 작업 수 (대기 + 실행 중). 만드는 중이면 0
+    jobs_ahead: int
+    # 끝날 때까지 남은 예상 시간(초). 대략적인 값이라 화면에는 "약 N초"로
+    estimated_seconds: float
+
+
 class GenerationResponse(BaseModel):
     """결과 조회 (GET /generations/{id}). DB(service/db.py)가 돌려주는 모양 그대로."""
 
@@ -149,6 +160,70 @@ class GenerationResponse(BaseModel):
     parent_id: str | None = None
     created_at: str
     input: GenerationInput
+    # 브라우저에서 고친 그림(배경 지우기·글자 직접 고치기)을 저장했으면 True
+    edited: bool = False
+    # processing일 때만. 서버를 다시 켜기 전 작업 등 알 수 없으면 None
+    progress: GenerationProgress | None = None
+
+
+class GenerationStarted(BaseModel):
+    """비동기 생성 접수 (POST /generations 202). 결과는 GET /generations/{id}로 확인."""
+
+    id: str
+    status: Literal["processing"] = "processing"
+    # 입력한 문구. 이미지보다 먼저 화면에 보여줄 수 있다 ("텍스트 짧게"면 완료 후 바뀔 수 있음)
+    message: str
+    width: int
+    height: int
+    estimated_seconds: float
+
+
+class FamilyItem(BaseModel):
+    id: str
+    parent_id: str | None = None
+    image_url: str
+    created_at: str
+
+
+class FamilyResponse(BaseModel):
+    """같은 원본에서 만든 결과 (GET /generations/{id}/family). 성공한 결과만, 만든 순서."""
+
+    items: list[FamilyItem]
+
+
+# download 다운로드, copy_link 링크 복사, remake 다시 만들기, edit_text 글자 직접 고치기 시작,
+# cutout 배경 지우고 색 채우기 완료, pick_copy 추천 문구 고름 (api_spec_next 1)
+EventType = Literal[
+    "download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"
+]
+EVENT_DETAIL_MAX_BYTES = 4096
+
+
+class EventRequest(BaseModel):
+    """POST /events 요청."""
+
+    generation_id: str = Field(max_length=64)
+    type: EventType
+    # 추가 정보 (자유 형식, JSON으로 4KB 이하). 예: {"edited": true}, {"index": 1, "copy": "…"}
+    detail: dict | None = None
+
+
+class DailyStats(BaseModel):
+    date: str
+    generated: int
+    downloaded: int
+    edited: int
+    remade: int
+    download_rate: float
+    edit_rate: float
+    remake_rate: float
+
+
+class StatsResponse(BaseModel):
+    """GET /stats. 단일 이미지 결과의 사용 지표 (상세페이지 칸 제외)."""
+
+    days: list[DailyStats]
+    total: DailyStats
 
 
 class TextEditRequest(BaseModel):
