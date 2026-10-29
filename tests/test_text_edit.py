@@ -174,3 +174,105 @@ def test_docs_show_text_edit_body(tmp_path):
     body = spec["paths"]["/generations/{generation_id}/text"]["post"]["requestBody"]
     properties = body["content"]["application/json"]["schema"]["properties"]
     assert {"message", "position", "font", "size_scale"} <= set(properties)
+
+
+# ---------------------------------------------------------------------- 고친 이미지 저장 (S7)
+def edited_png(size=(1024, 1024), color=(10, 200, 30)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def save_edit(client, gid, data, message=None, filename="edit.png"):
+    form = {"message": message} if message is not None else {}
+    return client.post(
+        f"/generations/{gid}/image",
+        data=form,
+        files={"image": (filename, data, "image/png")},
+    )
+
+
+def test_save_edited_image_replaces_result(tmp_path):
+    with make_client(tmp_path) as client:
+        body = generate(client)
+        res = save_edit(client, body["id"], edited_png(), message="직접 고친 문구")
+        saved = res.json()
+        image = fetch_image(client, saved["image_url"])
+        latest = client.get(f"/generations/{body['id']}").json()
+    assert res.status_code == 200, res.text
+    assert saved["image_url"] != body["image_url"]  # 새 주소 (캐시 회피)
+    assert image.getpixel((5, 5)) == (10, 200, 30)  # 올린 이미지 그대로
+    assert saved["message"] == "직접 고친 문구"
+    assert saved["background_url"] == body["background_url"]  # 원본은 그대로
+    assert saved["text_layout"] == body["text_layout"]
+    assert latest["image_url"] == saved["image_url"]  # 공유 링크도 고친 결과
+
+
+def test_save_edited_image_keeps_message_when_not_sent(tmp_path):
+    with make_client(tmp_path) as client:
+        body = generate(client)
+        saved = save_edit(client, body["id"], edited_png()).json()
+    assert saved["message"] == body["message"]
+
+
+def test_scaled_canvas_is_saved_at_original_size(tmp_path):
+    with make_client(tmp_path) as client:
+        body = generate(client)
+        saved = save_edit(client, body["id"], edited_png((512, 512))).json()
+        image = fetch_image(client, saved["image_url"])
+    assert image.size == (1024, 1024)
+
+
+def test_edited_image_with_other_ratio_returns_422(tmp_path):
+    with make_client(tmp_path) as client:
+        body = generate(client)
+        res = save_edit(client, body["id"], edited_png((1536, 864)))
+    assert res.status_code == 422
+
+
+def test_save_edit_requires_image(tmp_path):
+    with make_client(tmp_path) as client:
+        body = generate(client)
+        no_file = client.post(
+            f"/generations/{body['id']}/image", data={"message": "문구"}
+        )
+        json_body = client.post(f"/generations/{body['id']}/image", json={})
+    assert no_file.status_code == 422
+    assert json_body.status_code == 422
+
+
+def test_save_edit_unknown_or_unfinished(tmp_path):
+    with make_client(
+        tmp_path, primary=MockGenerator(0.5), generate_wait_seconds=0.05
+    ) as client:
+        unknown = save_edit(client, "nope", edited_png())
+        assert client.post("/generate", json=BASE_BODY).status_code == 503
+        gid = db_rows(tmp_path)[0]["id"]
+        processing = save_edit(client, gid, edited_png())
+    assert unknown.status_code == 404
+    assert processing.status_code == 409
+
+
+def test_save_edit_rejects_bad_files(tmp_path):
+    import os
+
+    with make_client(tmp_path, max_upload_bytes=1000) as client:
+        body = generate(client)
+        too_big = save_edit(client, body["id"], os.urandom(2000))
+    with make_client(tmp_path) as client:
+        not_image = save_edit(client, body["id"], b"GIF89a" + b"0" * 20, "a.gif")
+    assert too_big.status_code == 413
+    assert not_image.status_code == 415
+
+
+def test_save_edit_does_not_count_toward_daily_limit(tmp_path):
+    with make_client(tmp_path, daily_job_limit=1) as client:
+        body = generate(client)
+        res = save_edit(client, body["id"], edited_png())
+        health = client.get("/health").json()
+    assert res.status_code == 200
+    assert health["jobs_today"] == 1

@@ -62,6 +62,7 @@ MSG_DAILY_LIMIT = "오늘 만들 수 있는 횟수를 다 썼어요."
 MSG_BUSY = "지금 요청이 많아요. 잠시 후 다시 시도해 주세요."
 MSG_DETAIL_BUSY = "만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요."
 MSG_SECTION_BUSY = "아직 만들고 있어요. 다 만든 뒤에 다시 시도해 주세요."
+MSG_EDIT_SIZE = "이미지 비율이 원본과 달라요. 결과 화면에서 다시 저장해 주세요."
 MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 고쳐 주세요."
 MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
@@ -381,6 +382,115 @@ def _render_text(background, message, style, size_scale, position, font):
         position=position,
         font=font,
     )
+
+
+@router.post(
+    "/generations/{generation_id}/image",
+    response_model=GenerationResponse,
+    responses={
+        404: {"description": "없는 결과 id"},
+        409: {"description": "아직 processing·error인 결과"},
+        413: {"description": "이미지 10MB 초과"},
+        415: {"description": "PNG·JPG·WEBP가 아닌 이미지"},
+        422: {"description": "이미지 없음, 원본과 비율이 다름, 문구가 너무 김"},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "image": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "프론트에서 글자를 고쳐 그린 최종 이미지 (원본과 같은 비율)",
+                            },
+                            "message": {
+                                "type": "string",
+                                "description": "이미지에 얹은 문구 (비우면 지금 문구 유지)",
+                            },
+                        },
+                        "required": ["image"],
+                    }
+                }
+            },
+        }
+    },
+)
+async def save_edited_image(request: Request, generation_id: str) -> GenerationResponse:
+    """프론트에서 직접 고친 결과 이미지를 서버에 저장한다 (S7, 재생성 없음).
+
+    - "글자 직접 고치기"로 canvas에 그린 이미지를 올리면 `image_url`이 그 이미지로 바뀐다
+      → 링크 공유·다시 조회해도 고친 결과가 보인다. 일일 생성 한도에 세지 않음
+    - 글자 없는 원본(`background_url`)은 그대로라 다시 고칠 수 있다
+    - 응답 `image_url`은 새 주소 (브라우저 캐시 회피). 처음 결과 파일은 예전 링크용으로 남김
+    """
+    settings = _settings(request)
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data"):
+        raise HTTPException(
+            status_code=422, detail="이미지는 multipart/form-data로 보내 주세요."
+        )
+    form = await request.form()
+    upload = form.get("image")
+    if not isinstance(upload, UploadFile) or not upload.filename:
+        raise HTTPException(status_code=422, detail="저장할 이미지가 없어요.")
+    message = form.get("message")
+    message = message.strip() if isinstance(message, str) else ""
+    if len(message) > settings.max_message_chars:
+        raise HTTPException(
+            status_code=422,
+            detail=f"문구는 {settings.max_message_chars}자 이하로 입력해 주세요.",
+        )
+
+    records = _records(request)
+    record = await asyncio.to_thread(records.get, generation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    if record["status"] != "success":
+        raise HTTPException(status_code=409, detail=MSG_TEXT_NOT_READY)
+
+    image = await _read_edited_image(upload, settings, record)
+    updated = await asyncio.to_thread(
+        records.update_text,
+        generation_id,
+        image,
+        message=message or record["message"],
+        # 프론트 canvas는 자유 위치·스타일이라 서버 text_layout과 모양이 다르다.
+        # 서버 글자 고치기(/text)의 처음 값으로 쓰이도록 지금 값을 그대로 둔다
+        text_layout=record.get("text_layout"),
+    )
+    return GenerationResponse.model_validate(updated)
+
+
+async def _read_edited_image(
+    upload: UploadFile, settings: ServingSettings, record: dict
+) -> bytes:
+    """올린 이미지를 검사하고 PNG로 바꾼다. 원본과 비율이 다르면 422 (다른 그림으로 바꿔치기 방지)."""
+    data = await upload.read(settings.max_upload_bytes + 1)
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail=MSG_TOO_LARGE)
+    try:
+        image = Image.open(io.BytesIO(data))
+        image_format = image.format
+        image.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT) from exc
+    if image_format not in ALLOWED_REFERENCE_FORMATS:
+        raise HTTPException(status_code=415, detail=MSG_BAD_FORMAT)
+
+    width, height = record.get("width"), record.get("height")
+    if width and height and abs(image.width / image.height - width / height) > 0.01:
+        raise HTTPException(status_code=422, detail=MSG_EDIT_SIZE)
+    image = image.convert("RGB")
+    if width and height and image.size != (width, height):
+        # 화면 배율로 그린 canvas도 원본 크기로 맞춰 저장 (다운로드·공유 결과를 같게)
+        image = image.resize((width, height), Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------- /detail-pages

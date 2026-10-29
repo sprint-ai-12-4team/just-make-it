@@ -109,7 +109,7 @@ class GenerationRecords:
         return db.background(gid)
 
     def update_text(
-        self, gid: str, image: bytes, *, message: str, text_layout: dict
+        self, gid: str, image: bytes, *, message: str, text_layout: dict | None
     ) -> dict:
         """글자 고치기 결과 저장. 반환값은 조회 응답 모양 (image_url이 새 주소)."""
         return db.update_text(gid, image, message=message, text_layout=text_layout)
