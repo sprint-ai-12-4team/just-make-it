@@ -14,6 +14,7 @@ import time
 from PIL import Image, ImageOps
 
 from just_make_it import config
+from just_make_it.core import deadline
 from just_make_it.core.base import ImageGenerationError, ImageResult
 
 STEPS = 4
@@ -89,8 +90,13 @@ class KleinImageModel:
 
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
+        # 서빙이 제한 시간을 걸었으면 매 단계 확인해서 넘기면 바로 멈춤 (GPU를 놓아줌)
+        callback = deadline.step_callback(self.model)
+        if callback is not None:
+            extra["callback_on_step_end"] = callback
         start = time.perf_counter()
         try:
+            deadline.check(self.model)
             with self.lock:
                 image = self.pipe(
                     prompt=prompt,

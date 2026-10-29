@@ -244,6 +244,10 @@ class HealthResponse(BaseModel):
     daily_job_limit: int
     extra_calls_today: int
     extra_daily_limit: int
+    # OpenAI 금액 회로차단기 (오늘 합계, 상한, 열림 = OpenAI 막힘)
+    openai_cost_today_usd: float
+    openai_daily_budget_usd: float
+    openai_blocked: bool
 
 
 @dataclass
@@ -284,6 +288,8 @@ class GenerationOutput:
     cost_usd: float | None = None
     seed: int | None = None
     text_ms: int | None = None
+    # 그림 모델만 걸린 시간 (core image_sec). 문구·글자 얹기 제외
+    image_ms: int | None = None
     # 글자 없는 원본 (combined일 때만. 글자 고치기용)
     background_bytes: bytes | None = None
     # 실제로 얹은 {position, font, size_scale} (combined일 때만)

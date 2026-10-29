@@ -16,9 +16,12 @@ Fallback·프리미엄은 하루 extra_daily_limit까지만 쓰고, 넘으면 �
 타임아웃
 - 생성 1건은 generation_timeout_seconds 안에 끝나야 한다. 넘으면 재시도하지 않고
   (같은 호출이 또 밀릴 가능성이 높고 비용만 늘어남) Fallback 또는 실패로 처리한다.
-- 파이썬은 실행 중인 스레드를 강제로 멈출 수 없어서, 타임아웃 뒤에도 호출 자체는
-  뒤에서 끝날 때까지 돈다. 호출을 실제로 끊으려면 core의 OpenAI 클라이언트에도
-  timeout이 있어야 한다.
+- 파이썬은 실행 중인 스레드를 밖에서 멈출 수 없어서, 작업마다 core에 Deadline을 걸어
+  모델 호출이 스스로 멈추게 한다 (core/deadline.py). 시간이 지나거나 취소되면
+  OpenAI 호출은 남은 시간에서 끊기고(재시도 없음), klein은 다음 단계에서 멈추고,
+  core 안의 폴백(klein→flare, Gemma→luna)도 새로 시작하지 않는다.
+- /generate가 응답을 기다리다 포기하면(generate_wait_seconds) 작업도 취소한다.
+  프론트는 /generate 결과를 폴링하지 않으므로 끝까지 만들어도 아무도 못 보고 비용만 든다.
 
 기록
 - 접수할 때 `generations` 행(processing)을 만들고, 끝나면 성공·실패로 바꾼다 (service/db.py).
@@ -34,6 +37,8 @@ import math
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, timezone
+
+from just_make_it.core.deadline import Deadline, use_deadline
 
 from .generators import GeneratorError, ImageGenerator
 from .records import GenerationRecords
@@ -54,6 +59,31 @@ EXTRA_CONCURRENCY = 2
 
 ERROR_GENERIC = "잠시 후 다시 시도해 주세요."
 ERROR_INPUT = "입력 내용으로 이미지를 만들 수 없어요. 내용을 확인해 주세요."
+# core Deadline은 서빙 타임아웃보다 조금 늦게 끝나게 둔다. 서빙이 먼저 시간 초과를 알아채고
+# (재시도 없이 Fallback·실패 처리) 취소 신호를 보내야, core가 먼저 끊겨 "일반 실패"로
+# 보이면서 다시 시도되는 일이 없다
+DEADLINE_GRACE_SECONDS = 2.0
+
+
+def _run_within(deadline: Deadline, fn, *args):
+    with use_deadline(deadline):
+        return fn(*args)
+
+
+async def run_with_deadline(fn, *args, timeout: float):
+    """블로킹 함수를 스레드에서 돌리고, timeout이 지나면 core 작업도 멈추게 한다.
+
+    Raises:
+        TimeoutError: timeout 안에 안 끝났을 때 (core에는 취소 신호를 보냄)
+    """
+    deadline = Deadline(timeout + DEADLINE_GRACE_SECONDS)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run_within, deadline, fn, *args), timeout=timeout
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        deadline.cancel()
+        raise
 
 
 class QueueFullError(RuntimeError):
@@ -100,6 +130,12 @@ class Job:
     input_error: bool = False
     fallback_reason: str | None = None
     cost_usd: float | None = None
+    # core가 잰 단계별 시간: 문구(영어 묘사·텍스트 짧게), 그림 모델
+    text_ms: int | None = None
+    image_ms: int | None = None
+    # 지금 돌고 있는 core 호출의 Deadline. cancel()이 취소 신호를 보낸다
+    deadline: Deadline | None = None
+    cancelled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
@@ -113,7 +149,8 @@ class Job:
         return _ms(self.started_mono - self.submitted_mono)
 
     @property
-    def image_ms(self) -> int | None:
+    def run_ms(self) -> int | None:
+        """생성기 호출 전체(문구 + 그림 + 글자 얹기) 시간."""
         if self.started_mono is None or self.finished_mono is None:
             return None
         return _ms(self.finished_mono - self.started_mono)
@@ -150,6 +187,37 @@ class _DailyCounter:
             self._day, self._count = today, 0
 
 
+class _DailyBudget:
+    """Asia/Seoul 자정마다 초기화되는 OpenAI 금액 합계. limit 0이면 끔."""
+
+    def __init__(self, limit_usd: float) -> None:
+        self.limit = limit_usd
+        self._day: date = _DailyCounter._today()
+        self._spent = 0.0
+
+    @property
+    def spent(self) -> float:
+        self._roll()
+        return self._spent
+
+    @property
+    def exceeded(self) -> bool:
+        return bool(self.limit) and self.spent >= self.limit
+
+    def add(self, usd: float | None) -> None:
+        self._roll()
+        self._spent += usd or 0.0
+
+    def set(self, usd: float) -> None:
+        self._roll()
+        self._spent = usd
+
+    def _roll(self) -> None:
+        today = _DailyCounter._today()
+        if today != self._day:
+            self._day, self._spent = today, 0.0
+
+
 class QueueManager:
     """작업 접수, 경로 선택, 실행, 상태 조회를 담당한다."""
 
@@ -171,6 +239,9 @@ class QueueManager:
         self.seconds_per_job = settings.seconds_per_job_init
         self.jobs_today = _DailyCounter(settings.daily_job_limit)
         self.extra_today = _DailyCounter(settings.extra_daily_limit)
+        # OpenAI 금액 회로차단기 (V2). 열리면 Fallback·프리미엄·core 내부 폴백을 막는다
+        self.budget = _DailyBudget(settings.openai_daily_budget_usd)
+        self._core_fallback_default: bool | None = None
 
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._running: set[str] = set()
@@ -181,6 +252,12 @@ class QueueManager:
 
     # ------------------------------------------------------------------ 수명 주기
     async def start(self) -> None:
+        # 오늘 쓴 OpenAI 금액을 DB에서 이어받는다 (재시작해도 상한이 풀리지 않게)
+        try:
+            self.budget.set(await asyncio.to_thread(self.records.cost_today))
+        except Exception:
+            logger.exception("오늘 OpenAI 금액을 읽지 못함 (0으로 시작)")
+        self._sync_core_fallback()
         # API 모델(Fallback·프리미엄)은 금방 준비되니 먼저 기다리고,
         # 로컬 모델(klein)은 GPU에 올리는 데 오래 걸려서 설정에 따라 뒤에서 불러온다.
         # 다 불러오기 전에 들어온 기본 요청은 primary_not_ready로 Fallback 처리된다.
@@ -248,7 +325,9 @@ class QueueManager:
         결과를 폴링하는 작업. 섹션 5칸이 한꺼번에 들어와 대기가 길어 보여도 비용을 아낀다).
         준비 안 됨·장애 Fallback은 그대로 적용된다.
         """
-        goes_premium = premium and self._usable(self.premium)
+        self._sync_core_fallback()
+        # 금액 상한을 넘으면 "더 정교하게"도 로컬 대기열로 (extra 한도를 넘은 경우와 같음)
+        goes_premium = premium and self._usable(self.premium) and self.api_allowed
         if (
             not goes_premium
             and self._queue.qsize() >= self.settings.queue_max_size
@@ -322,16 +401,51 @@ class QueueManager:
         return job
 
     def _fallback_reason(self, wait_fallback: bool = True) -> str | None:
-        if not self._usable(self.fallback):
+        if not self._usable(self.fallback) or not self.api_allowed:
             return None
         if not self.primary.is_ready:
             return "primary_not_ready"
         if (
             wait_fallback
+            and self._jobs_ahead() >= self.concurrency
             and self.estimated_wait_for_new_job() > self.settings.max_wait_seconds
         ):
+            # 앞에 기다리는 작업이 있어 바로 시작할 수 없을 때만 넘긴다. 빈 워커가 있으면
+            # 1건 평균 시간이 길어도(klein 첫 호출 등) 대기 자체는 0이므로 OpenAI로 넘기지 않음
             return "queue_wait"
         return None
+
+    @property
+    def api_allowed(self) -> bool:
+        """OpenAI를 써도 되는지 (금액 회로가 닫혀 있는지)."""
+        return not self.budget.exceeded
+
+    def text_quality(self, requested: str) -> str:
+        """금액 상한을 넘었으면 "더 자연스럽게"(luna)도 로컬 Gemma(basic)로 바꾼다."""
+        return requested if self.api_allowed else "basic"
+
+    def _sync_core_fallback(self) -> None:
+        """금액 상한을 넘으면 core 안의 폴백(klein→flare, Gemma→luna)도 끈다. 자정에 원래대로.
+
+        core는 호출마다 config.USE_FALLBACK을 읽는다. 프로세스 전체 값이라 회로와 같이 움직인다.
+        """
+        from just_make_it import config
+
+        if self._core_fallback_default is None:
+            self._core_fallback_default = config.USE_FALLBACK
+        wanted = self._core_fallback_default and self.api_allowed
+        if config.USE_FALLBACK != wanted:
+            config.USE_FALLBACK = wanted
+            logger.warning(
+                "OpenAI 금액 회로 %s: 오늘 $%.4f / 상한 $%.2f",
+                "닫힘(OpenAI 사용)" if wanted else "열림(OpenAI 막음)",
+                self.budget.spent,
+                self.budget.limit,
+            )
+
+    def _jobs_ahead(self) -> int:
+        """새 작업 앞에 있는 기본 작업 수 (대기 중 + 실행 중)."""
+        return self._queue.qsize() + len(self._running)
 
     async def check_capacity(self, client_id: str, count: int) -> None:
         """작업 count개를 한꺼번에 받을 수 있는지 미리 확인한다 (상세페이지 5칸).
@@ -362,7 +476,22 @@ class QueueManager:
 
     def estimated_wait_for_new_job(self) -> float:
         """지금 접수하는 기본 작업이 끝날 때까지의 예상 시간(초)."""
-        return self._wait_for(self._queue.qsize() + len(self._running))
+        return self._wait_for(self._jobs_ahead())
+
+    def cancel(self, job: Job, reason: str) -> None:
+        """작업을 취소한다. 대기 중이면 건너뛰고, 실행 중이면 core가 멈추게 한다.
+
+        이미 끝난 작업은 그대로 둔다.
+        """
+        if job.is_finished or job.cancelled:
+            return
+        job.cancelled = True
+        logger.info("작업 취소 job=%s (%s)", job.id, reason)
+        if job.deadline is not None:
+            job.deadline.cancel()
+        if job.state == JobState.QUEUED:
+            # 기본 대기열에서 꺼낼 때 건너뛴다. 실패 기록은 지금 남겨 응답과 DB를 맞춘다
+            self._fail(job, f"cancelled: {reason}", ERROR_GENERIC)
 
     async def wait(self, job: Job, timeout: float) -> bool:
         """작업 완료를 최대 timeout초 기다린다. 끝났으면 True."""
@@ -385,16 +514,29 @@ class QueueManager:
         return len(self._running)
 
     # ------------------------------------------------------------------ 실행
-    async def _call(self, generator: ImageGenerator, spec: GenerationSpec):
-        """제한 시간을 걸고 생성기를 호출한다."""
-        return await asyncio.wait_for(
-            asyncio.to_thread(generator.generate, spec),
-            timeout=self.settings.generation_timeout_seconds,
-        )
+    async def _call(self, generator: ImageGenerator, job: Job):
+        """제한 시간을 걸고 생성기를 호출한다. 시간이 지나면 core 작업도 멈춘다."""
+        timeout = self.settings.generation_timeout_seconds
+        job.deadline = Deadline(timeout + DEADLINE_GRACE_SECONDS)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _run_within, job.deadline, generator.generate, job.spec
+                ),
+                timeout=timeout,
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            job.deadline.cancel()
+            raise
+        finally:
+            job.deadline = None
 
     async def _worker_loop(self) -> None:
         while True:
             job = await self._queue.get()
+            if job.cancelled:  # 기다리는 동안 취소됨 (cancel()이 이미 실패로 기록)
+                self._queue.task_done()
+                continue
             self._running.add(job.id)
             job.state = JobState.RUNNING
             job.started_mono = time.monotonic()
@@ -413,7 +555,7 @@ class QueueManager:
         for attempt in range(1, attempts + 1):
             started = time.monotonic()
             try:
-                output = await self._call(self.primary, job.spec)
+                output = await self._call(self.primary, job)
             except TimeoutError:
                 last_error = (
                     f"timeout after {self.settings.generation_timeout_seconds:.0f}s"
@@ -421,6 +563,9 @@ class QueueManager:
                 logger.warning("기본 생성 시간 초과 job=%s", job.id)
                 break  # 시간 초과는 재시도하지 않음
             except GeneratorError as exc:
+                if job.cancelled:  # 취소 신호로 core가 멈춘 것 → 다시 시도하지 않음
+                    self._fail(job, f"cancelled: {exc}", ERROR_GENERIC)
+                    return
                 if not exc.retryable:
                     self._fail(job, str(exc), ERROR_INPUT, input_error=True)
                     return
@@ -433,8 +578,11 @@ class QueueManager:
             await self._finish(job, output, self.primary)
             return
 
-        # 재시도까지 실패 또는 시간 초과 → 장애 Fallback
-        if self._usable(self.fallback) and self.extra_today.take():
+        # 재시도까지 실패 또는 시간 초과 → 장애 Fallback (취소된 작업은 넘기지 않음)
+        if job.cancelled:
+            self._fail(job, f"cancelled: {last_error}", ERROR_GENERIC)
+            return
+        if self._usable(self.fallback) and self.api_allowed and self.extra_today.take():
             job.route, job.fallback_reason = "fallback", "primary_error"
             logger.info("장애 Fallback (%s): job=%s", last_error, job.id)
             self._spawn_extra(job, self.fallback)  # type: ignore[arg-type]
@@ -448,11 +596,14 @@ class QueueManager:
 
     async def _run_extra(self, job: Job, generator: ImageGenerator) -> None:
         async with self._extra_slots:
+            if job.cancelled:  # 자리를 기다리는 동안 취소됨
+                self._fail(job, "cancelled before start", ERROR_GENERIC)
+                return
             job.state = JobState.RUNNING
             if job.started_mono is None:
                 job.started_mono = time.monotonic()
             try:
-                output = await self._call(generator, job.spec)
+                output = await self._call(generator, job)
             except TimeoutError:
                 self._fail(
                     job,
@@ -461,7 +612,9 @@ class QueueManager:
                 )
                 return
             except GeneratorError as exc:
-                if exc.retryable:
+                if job.cancelled:
+                    self._fail(job, f"cancelled: {exc}", ERROR_GENERIC)
+                elif exc.retryable:
                     self._fail(job, str(exc), ERROR_GENERIC)
                 else:
                     self._fail(job, str(exc), ERROR_INPUT, input_error=True)
@@ -479,6 +632,12 @@ class QueueManager:
         job.model = output.model
         job.prompt = output.prompt
         job.cost_usd = output.cost_usd
+        self.budget.add(output.cost_usd)
+        self._sync_core_fallback()
+        # 문구·그림 시간은 core가 단계별로 잰 값. 없으면(mock 등) 호출 전체 시간을 그림으로 본다
+        job.text_ms = output.text_ms
+        job.image_ms = output.image_ms if output.image_ms is not None else job.run_ms
+        output.params = {**output.params, "run_ms": job.run_ms}
         if output.fallback_reason and job.route == "primary":
             # core가 안에서 로컬 모델 대신 API 모델로 만든 경우 (예: klein 실패 → flare)
             job.route, job.fallback_reason = "fallback", "core_fallback"
@@ -510,6 +669,8 @@ class QueueManager:
         *,
         input_error: bool = False,
     ) -> None:
+        if job.is_finished:  # 취소와 실패가 겹치면 처음 기록만 남긴다
+            return
         logger.error("작업 실패 job=%s route=%s: %s", job.id, job.route, internal_error)
         job.error = user_error
         job.error_internal = internal_error
@@ -556,7 +717,9 @@ class QueueManager:
             "status": job.state.value,
             "error": job.error_internal,
             "queue_ms": job.queue_ms,
+            "text_ms": job.text_ms,
             "image_ms": job.image_ms,
+            "run_ms": job.run_ms,
             "cost_usd": job.cost_usd,
         }
         generation_log.info(json.dumps(record, ensure_ascii=False))

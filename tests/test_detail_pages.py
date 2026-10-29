@@ -21,12 +21,11 @@ from test_serving import (  # noqa: F401 (isolate_env·fake_core는 fixture)
 )
 
 from just_make_it.core.base import TextResult
+from just_make_it.core.detail_writer import DETAIL_RULES
 from just_make_it.serving.detail_pages import (
-    DETAIL_RULES,
     CoreDetailWriter,
     DetailWriter,
     MockDetailWriter,
-    parse_sections,
 )
 from just_make_it.serving.generators import GeneratorError, MockGenerator
 
@@ -366,37 +365,6 @@ def test_regenerate_bad_index_returns_422(tmp_path):
 
 
 # ---------------------------------------------------------------------- 문구 5칸
-def test_parse_sections_accepts_model_format():
-    sections = parse_sections(MODEL_OUTPUT, [])
-    assert [s["role"] for s in sections] == [
-        "hero",
-        "feature",
-        "feature",
-        "feature",
-        "closing",
-    ]
-    assert sections[0] == {
-        "role": "hero",
-        "title": "국산 딸기 100%, 그대로 담았어요",
-        "body": "설탕 말고 딸기 맛만 남겼습니다",
-        "image_prompt": "유리병에 담긴 딸기잼",
-    }
-
-
-def test_parse_sections_tolerates_decorations_and_fixes_feature_titles():
-    text = "다음은 상세페이지입니다.\n" + "\n".join(
-        f"{line[0]}. |{line[3:]}" for line in MODEL_OUTPUT.splitlines()
-    )
-    sections = parse_sections("```\n" + text + "\n```", ["무첨가"])
-    assert sections[1]["title"] == "무첨가"  # 직접 적은 특징은 그대로
-    assert sections[2]["title"] == "조금씩 만들어요"  # 모자란 특징은 모델 문구
-
-
-def test_parse_sections_rejects_missing_rows():
-    with pytest.raises(ValueError):
-        parse_sections("\n".join(MODEL_OUTPUT.splitlines()[:4]), [])
-
-
 @pytest.mark.usefixtures("fake_core")
 def test_core_detail_writer_retries_bad_format(monkeypatch):
     from just_make_it.core import ai_models
