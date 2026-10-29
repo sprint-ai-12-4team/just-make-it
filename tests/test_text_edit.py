@@ -187,25 +187,27 @@ def edited_png(size=(1024, 1024), color=(10, 200, 30)) -> bytes:
     return buffer.getvalue()
 
 
-def save_edit(client, gid, data, message=None, filename="edit.png"):
+def save_edit(client, gid, data, message=None, filename="edit.png", background=None):
     form = {"message": message} if message is not None else {}
-    return client.post(
-        f"/generations/{gid}/image",
-        data=form,
-        files={"image": (filename, data, "image/png")},
-    )
+    files = {"image": (filename, data, "image/png")}
+    if background is not None:
+        files["background"] = ("bg.png", background, "image/png")
+    return client.post(f"/generations/{gid}/image", data=form, files=files)
 
 
 def test_save_edited_image_replaces_result(tmp_path):
     with make_client(tmp_path) as client:
         body = generate(client)
+        before = client.get(f"/generations/{body['id']}").json()
         res = save_edit(client, body["id"], edited_png(), message="직접 고친 문구")
         saved = res.json()
         image = fetch_image(client, saved["image_url"])
         latest = client.get(f"/generations/{body['id']}").json()
     assert res.status_code == 200, res.text
+    assert before["edited"] is False
+    assert saved["edited"] is True and latest["edited"] is True
     assert saved["image_url"] != body["image_url"]  # 새 주소 (캐시 회피)
-    assert image.getpixel((5, 5)) == (10, 200, 30)  # 올린 이미지 그대로
+    assert image.getpixel((5, 5)) == (10, 200, 30)  # 올린 그림 그대로
     assert saved["message"] == "직접 고친 문구"
     assert saved["background_url"] == body["background_url"]  # 원본은 그대로
     assert saved["text_layout"] == body["text_layout"]
@@ -219,19 +221,32 @@ def test_save_edited_image_keeps_message_when_not_sent(tmp_path):
     assert saved["message"] == body["message"]
 
 
-def test_scaled_canvas_is_saved_at_original_size(tmp_path):
+def test_save_background_moves_text_edit_onto_new_background(tmp_path):
+    # 배경을 지운 그림을 함께 올리면 이후 서버 글자 고치기가 그 위에 얹는다
     with make_client(tmp_path) as client:
         body = generate(client)
-        saved = save_edit(client, body["id"], edited_png((512, 512))).json()
-        image = fetch_image(client, saved["image_url"])
-    assert image.size == (1024, 1024)
+        cut = edited_png(color=(250, 250, 250))
+        saved = save_edit(client, body["id"], edited_png(), background=cut).json()
+        bg = fetch_image(client, saved["background_url"])
+        retext = client.post(
+            f"/generations/{body['id']}/text", json={"position": "bottom"}
+        ).json()
+        image = fetch_image(client, retext["image_url"])
+    assert saved["background_url"] != body["background_url"]
+    assert bg.getpixel((5, 5)) == (250, 250, 250)
+    assert image.getpixel((5, 5)) == (250, 250, 250)  # 지운 배경 위에 글자
 
 
-def test_edited_image_with_other_ratio_returns_422(tmp_path):
+@pytest.mark.parametrize("size", [(512, 512), (1536, 864)])
+def test_edited_image_with_other_size_returns_400(tmp_path, size):
     with make_client(tmp_path) as client:
         body = generate(client)
-        res = save_edit(client, body["id"], edited_png((1536, 864)))
-    assert res.status_code == 422
+        res = save_edit(client, body["id"], edited_png(size))
+        bad_bg = save_edit(
+            client, body["id"], edited_png(), background=edited_png(size)
+        )
+    assert res.status_code == 400
+    assert bad_bg.status_code == 400
 
 
 def test_save_edit_requires_image(tmp_path):
@@ -258,15 +273,22 @@ def test_save_edit_unknown_or_unfinished(tmp_path):
 
 
 def test_save_edit_rejects_bad_files(tmp_path):
+    import io
     import os
 
+    from PIL import Image
+
+    jpeg = io.BytesIO()
+    Image.new("RGB", (1024, 1024)).save(jpeg, format="JPEG")
     with make_client(tmp_path, max_upload_bytes=1000) as client:
         body = generate(client)
         too_big = save_edit(client, body["id"], os.urandom(2000))
     with make_client(tmp_path) as client:
         not_image = save_edit(client, body["id"], b"GIF89a" + b"0" * 20, "a.gif")
+        not_png = save_edit(client, body["id"], jpeg.getvalue(), "a.jpg")
     assert too_big.status_code == 413
     assert not_image.status_code == 415
+    assert not_png.status_code == 415
 
 
 def test_save_edit_does_not_count_toward_daily_limit(tmp_path):

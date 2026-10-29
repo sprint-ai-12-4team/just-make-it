@@ -148,6 +148,65 @@ class GenerationRecords:
             conn.close()
         return row[0] if row else None
 
+    def _read(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
+        """읽기 전용 연결로 조회 (service/db.py에 없는 조회용)."""
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(sql, args).fetchall()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ 같은 원본·고친 그림·사용 기록
+    def family(self, gid: str, limit: int = 50) -> list[dict] | None:
+        """같은 원본에서 만든 성공 결과 (만든 순서). 없는 id·상세페이지 섹션이면 None."""
+        return db.family(gid, limit)
+
+    def replace_image(
+        self,
+        gid: str,
+        image: bytes,
+        *,
+        background: bytes | None = None,
+        message: str | None = None,
+    ) -> dict:
+        """브라우저에서 고친 그림 저장. 반환값은 조회 응답 모양 (image_url 새 주소, edited=True)."""
+        return db.replace_image(gid, image, background=background, message=message)
+
+    def add_event(
+        self, gid: str, client_id: str, event_type: str, detail: dict | None
+    ) -> bool:
+        """사용 기록 1건. 없는 결과 id면 False."""
+        return db.add_event(gid, client_id, event_type, detail)
+
+    def adoption_stats(self, days: int) -> list[dict]:
+        """최근 days일(한국 날짜) 단일 이미지 결과의 사용 지표. 날짜 오름차순.
+
+        - generated: 성공한 결과 수 (상세페이지 칸 제외)
+        - downloaded: 그중 다운로드 또는 링크 복사된 결과 수
+        - edited: 그중 글자 직접 고치기·배경 지우기를 했거나 고친 그림을 저장한 결과 수
+        - remade: 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (parent_id 기준)
+        """
+        rows = self._read(
+            """SELECT date(g.created_at, '+9 hours') AS day,
+                      COUNT(*) AS generated,
+                      SUM(EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                                 AND e.type IN ('download', 'copy_link'))) AS downloaded,
+                      SUM(EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                                 AND e.type IN ('edit_text', 'cutout'))
+                          OR COALESCE(json_extract(g.params_json, '$.edited'), 0))
+                          AS edited,
+                      SUM(EXISTS(SELECT 1 FROM generations c
+                                 WHERE c.parent_id = g.id)) AS remade
+                 FROM generations g
+                WHERE g.status = 'success' AND g.detail_page_id IS NULL
+                  AND g.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                        '+9 hours', 'start of day', ?, '-9 hours')
+                GROUP BY day ORDER BY day""",
+            (f"-{max(0, days - 1)} days",),
+        )
+        return [dict(row) for row in rows]
+
     # ------------------------------------------------------------------ 상세페이지
     def start_detail_page(self, client_id: str, input: dict) -> str:
         return db.start_detail_page(client_id, input)

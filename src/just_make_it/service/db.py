@@ -6,7 +6,7 @@
              → 섹션마다 start_generation(detail_page_id=, section_index=) → finish | fail
   조회: get_generation, get_detail_page / 제한: count_today, has_running_detail_page
   글자 고치기: background(원본 바이트) → (core render_text) → update_text
-  추가 (docs/api_spec_next.md): add_event, replace_image(브라우저에서 고친 그림), family
+  고친 그림 저장: replace_image (api_spec_next 2) / 같은 원본 목록: family (3) / 사용 기록: add_event (1)
 
 ponytail: 로컬 SQLite·디스크는 ms 단위라 동기 함수. 이벤트 루프가 막히면 서빙에서 asyncio.to_thread로 감싸기
 """
@@ -21,9 +21,6 @@ from just_make_it.service import storage
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 SECTION_COUNT = 5  # 대표 · 특징 ×3 · 마무리 (api_spec)
-EVENT_TYPES = {"download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"}
-MAX_EVENT_DETAIL = 4096  # 바이트
-FAMILY_LIMIT = 50
 
 # finish_generation에서 바로 저장할 수 있는 열
 _RESULT_COLS = {
@@ -142,89 +139,87 @@ def update_text(gid: str, image: bytes, *, message: str, text_layout: dict) -> d
     return get_generation(gid)
 
 
-def png_size(data: bytes) -> tuple[int, int] | None:
-    """PNG면 (가로, 세로), 아니면 None. 헤더(IHDR)만 읽음"""
-    if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
-        return None
-    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+def replace_image(gid: str, image: bytes, *, background: bytes | None = None, message: str | None = None) -> dict:
+    """브라우저에서 고친 그림 저장 (배경 지우기·글자 직접 고치기). 새 파일 이름 → image_url이 새 주소.
 
-
-def replace_image(gid: str, image: bytes, background: bytes | None = None, message: str | None = None) -> dict:
-    """브라우저에서 고친 그림 저장 (api_spec_next 2장). 서빙이 먼저 404·409를 거른 뒤 부름.
-
-    message: 그림에 얹은 문구 (다시 고치기·다시 만들기가 이어 씀). 없으면 그대로.
-    PNG가 아니거나 원래 결과와 크기가 다르면 ValueError. update_text처럼 새 파일 이름으로 저장하고
-    중간 파일은 지움 (첫 결과 파일은 이전에 공유된 링크용으로 남김).
+    background를 주면 글자 없는 원본도 바꿈 → 이후 글자 고치기(/text)가 지운 배경 위에 얹음.
+    message를 주면 문구도 바꿈. text_layout은 그대로 (글자 고치기의 처음 값). edited=True로 표시.
     """
-    g = get_generation(gid)
-    assert g and g["status"] == "success", "성공한 결과만 고칠 수 있습니다"
-    for data in (image, background):
-        if data is not None and png_size(data) != (g["width"], g["height"]):
-            raise ValueError("원래 그림과 같은 크기의 PNG만 올릴 수 있어요.")
     row = _run("SELECT image_path, params_json, copy_json FROM generations WHERE id=?", (gid,))[0]
+    old = row["image_path"]
+    params = json.loads(row["params_json"] or "{}")
     copy = json.loads(row["copy_json"] or "{}")
-    if message:
-        copy["message"] = message
-    params = {**json.loads(row["params_json"] or "{}"), "edited": True}
     tag = uuid.uuid4().hex[:8]
     path = storage.save(f"{gid}-{tag}.png", image)
     old_bg = params.get("background_path")
     if background is not None:
         params["background_path"] = storage.save(f"{gid}-bg-{tag}.png", background)
+    params["edited"] = True
+    if message is not None:
+        copy["message"] = message
     _run(
         "UPDATE generations SET image_path=?, params_json=?, copy_json=? WHERE id=?",
         (path, json.dumps(params), json.dumps(copy, ensure_ascii=False), gid),
     )
-    if row["image_path"] != f"{gid}.png":
-        storage.remove(row["image_path"])
+    if old != f"{gid}.png":  # 첫 결과 파일은 남김 (이전에 공유된 링크용)
+        storage.remove(old)
     if background is not None and old_bg and old_bg != f"{gid}-bg.png":
         storage.remove(old_bg)
     return get_generation(gid)
 
 
-def add_event(client_id: str, gid: str, type: str, detail: dict | None = None) -> None:
-    """사용 기록 (api_spec_next 1장). 모르는 type·없는 결과·너무 큰 detail이면 ValueError (→ 400)."""
+def family(gid: str, limit: int = 50) -> list[dict] | None:
+    """같은 원본에서 다시 만든 결과 (만든 순서). parent_id를 거슬러 맨 처음 결과를 찾고 그 아래 모두.
+
+    성공한 단일 이미지만 (상세페이지 섹션 제외). 없는 id·섹션 id면 None. 혼자인 결과는 자기 1개.
+    """
+    rows = _run(
+        """WITH RECURSIVE
+             up(id, parent_id, depth) AS (
+               SELECT id, parent_id, 0 FROM generations WHERE id=? AND detail_page_id IS NULL
+               UNION ALL
+               SELECT g.id, g.parent_id, up.depth + 1 FROM generations g JOIN up ON g.id = up.parent_id
+                WHERE up.depth < 100),
+             root(id) AS (SELECT id FROM up ORDER BY depth DESC LIMIT 1),
+             down(id, depth) AS (
+               SELECT id, 0 FROM root
+               UNION ALL
+               SELECT g.id, down.depth + 1 FROM generations g JOIN down ON g.parent_id = down.id
+                WHERE down.depth < 100)
+           SELECT g.id, g.parent_id, g.image_path, g.created_at, g.status, g.detail_page_id
+             FROM down JOIN generations g ON g.id = down.id
+            ORDER BY g.created_at, g.rowid""",
+        (gid,),
+    )
+    if not rows:
+        return None
+    items = [
+        {"id": r["id"], "parent_id": r["parent_id"], "image_url": storage.url(r["image_path"]), "created_at": r["created_at"]}
+        for r in rows
+        if r["status"] == "success" and r["detail_page_id"] is None
+    ]
+    return items[:limit]
+
+
+EVENT_TYPES = {"download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"}
+
+
+def add_event(gid: str, client_id: str, type: str, detail: dict | None = None) -> bool:
+    """사용 기록 1건. 없는 결과 id면 False. download·copy_link이면 첫 시각을 downloaded_at에도."""
     if type not in EVENT_TYPES:
         raise ValueError(f"모르는 type: {type}")
-    detail_json = json.dumps(detail, ensure_ascii=False) if detail is not None else None
-    if detail_json and len(detail_json.encode()) > MAX_EVENT_DETAIL:
-        raise ValueError("detail이 너무 큽니다")
     if not _run("SELECT 1 FROM generations WHERE id=?", (gid,)):
-        raise ValueError("없는 결과입니다")
+        return False
     _run(
         "INSERT INTO events (generation_id, client_id, type, detail_json) VALUES (?, ?, ?, ?)",
-        (gid, client_id, type, detail_json),
+        (gid, client_id, type, json.dumps(detail, ensure_ascii=False) if detail else None),
     )
     if type in ("download", "copy_link"):
         _run(
-            """UPDATE generations SET downloaded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-               WHERE id=? AND downloaded_at IS NULL""",
+            "UPDATE generations SET downloaded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=? AND downloaded_at IS NULL",
             (gid,),
         )
-
-
-def family(gid: str) -> list[dict] | None:
-    """같은 원본(parent_id를 거슬러 올라간 맨 처음 결과)에서 나온 성공 결과들, 만든 순서. 없는 id면 None."""
-    if not _run("SELECT 1 FROM generations WHERE id=?", (gid,)):
-        return None
-    rows = _run(
-        """WITH RECURSIVE
-             up(id, parent_id) AS (
-               SELECT id, parent_id FROM generations WHERE id=?
-               UNION SELECT g.id, g.parent_id FROM generations g JOIN up ON g.id = up.parent_id),
-             down(id) AS (
-               SELECT id FROM up WHERE parent_id IS NULL
-               UNION SELECT g.id FROM generations g JOIN down ON g.parent_id = down.id)
-           SELECT g.id, g.parent_id, g.image_path, g.created_at
-           FROM generations g JOIN down USING (id)
-           WHERE g.status='success' AND g.detail_page_id IS NULL
-           ORDER BY g.created_at LIMIT ?""",
-        (gid, FAMILY_LIMIT),
-    )
-    return [
-        {"id": r["id"], "parent_id": r["parent_id"], "image_url": storage.url(r["image_path"]), "created_at": r["created_at"]}
-        for r in rows
-    ]
+    return True
 
 
 def get_generation(gid: str) -> dict | None:
@@ -247,9 +242,9 @@ def get_generation(gid: str) -> dict | None:
         "width": params.get("width"),
         "height": params.get("height"),
         "parent_id": r["parent_id"],
-        "edited": params.get("edited", False),
         "created_at": r["created_at"],
         "input": input,
+        "edited": bool(params.get("edited")),
     }
 
 
