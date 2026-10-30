@@ -175,9 +175,9 @@ class GenerationRecords:
 
     def add_event(
         self, gid: str, client_id: str, event_type: str, detail: dict | None
-    ) -> bool:
-        """사용 기록 1건. 없는 결과 id면 False."""
-        return db.add_event(gid, client_id, event_type, detail)
+    ) -> None:
+        """사용 기록 1건. 모르는 type·없는 결과 id·4KB 넘는 detail이면 ValueError."""
+        db.add_event(client_id, gid, event_type, detail)
 
     def adoption_stats(self, days: int) -> list[dict]:
         """최근 days일(한국 날짜) 단일 이미지 결과의 사용 지표. 날짜 오름차순.

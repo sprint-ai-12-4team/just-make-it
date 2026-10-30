@@ -27,7 +27,6 @@ from .queue_manager import (
 )
 from .records import GenerationRecords
 from .schemas import (
-    EVENT_DETAIL_MAX_BYTES,
     IMAGE_QUALITY,
     TEXT_QUALITY,
     CopiesRequest,
@@ -407,19 +406,16 @@ async def add_event(
         payload = EventRequest.model_validate(body)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=MSG_EVENT_BAD) from exc
-    if payload.detail is not None:
-        size = len(json.dumps(payload.detail, ensure_ascii=False).encode())
-        if size > EVENT_DETAIL_MAX_BYTES:
-            raise HTTPException(status_code=400, detail=MSG_EVENT_BAD)
-    added = await asyncio.to_thread(
-        _records(request).add_event,
-        payload.generation_id,
-        _client_id(x_client_id),
-        payload.type,
-        payload.detail,
-    )
-    if not added:
-        raise HTTPException(status_code=400, detail=MSG_EVENT_BAD)
+    try:  # 없는 결과 id, 4KB 넘는 detail은 service/db.py가 ValueError
+        await asyncio.to_thread(
+            _records(request).add_event,
+            payload.generation_id,
+            _client_id(x_client_id),
+            payload.type,
+            payload.detail,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=MSG_EVENT_BAD) from exc
     return Response(status_code=204)
 
 
@@ -630,13 +626,21 @@ async def save_edited_image(request: Request, generation_id: str) -> GenerationR
         if background_upload is not None
         else None
     )
-    updated = await asyncio.to_thread(
-        records.replace_image,
-        generation_id,
-        image,
-        background=background,
-        message=message or None,
-    )
+    try:  # 위에서 검사했지만 service/db.py도 PNG·크기를 다시 확인한다
+        updated = await asyncio.to_thread(
+            records.replace_image,
+            generation_id,
+            image,
+            background=background,
+            message=message or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=MSG_EDIT_SIZE.format(
+                width=record.get("width"), height=record.get("height")
+            ),
+        ) from exc
     return GenerationResponse.model_validate(updated)
 
 

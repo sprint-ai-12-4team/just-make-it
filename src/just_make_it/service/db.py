@@ -139,15 +139,30 @@ def update_text(gid: str, image: bytes, *, message: str, text_layout: dict) -> d
     return get_generation(gid)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_size(data: bytes) -> tuple[int, int]:
+    """PNG 머리(IHDR)에서 가로·세로를 읽음. PNG가 아니면 ValueError."""
+    if len(data) < 24 or not data.startswith(PNG_SIGNATURE) or data[12:16] != b"IHDR":
+        raise ValueError("PNG가 아님")
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
 def replace_image(gid: str, image: bytes, *, background: bytes | None = None, message: str | None = None) -> dict:
     """브라우저에서 고친 그림 저장 (배경 지우기·글자 직접 고치기). 새 파일 이름 → image_url이 새 주소.
 
     background를 주면 글자 없는 원본도 바꿈 → 이후 글자 고치기(/text)가 지운 배경 위에 얹음.
     message를 주면 문구도 바꿈. text_layout은 그대로 (글자 고치기의 처음 값). edited=True로 표시.
+    image·background는 PNG이고 원래 결과와 같은 크기(width×height)여야 함. 아니면 ValueError.
     """
     row = _run("SELECT image_path, params_json, copy_json FROM generations WHERE id=?", (gid,))[0]
     old = row["image_path"]
     params = json.loads(row["params_json"] or "{}")
+    size = (params.get("width"), params.get("height"))
+    for data in (image, background):
+        if data is not None and _png_size(data) != size:
+            raise ValueError(f"크기가 원래 결과 {size[0]}×{size[1]}와 다름")
     copy = json.loads(row["copy_json"] or "{}")
     tag = uuid.uuid4().hex[:8]
     path = storage.save(f"{gid}-{tag}.png", image)
@@ -202,14 +217,22 @@ def family(gid: str, limit: int = 50) -> list[dict] | None:
 
 
 EVENT_TYPES = {"download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"}
+EVENT_DETAIL_MAX_BYTES = 4096
 
 
-def add_event(gid: str, client_id: str, type: str, detail: dict | None = None) -> bool:
-    """사용 기록 1건. 없는 결과 id면 False. download·copy_link이면 첫 시각을 downloaded_at에도."""
+def add_event(client_id: str, gid: str, type: str, detail: dict | None = None) -> None:
+    """사용 기록 1건. download·copy_link이면 첫 시각을 downloaded_at에도.
+
+    모르는 type, 없는 결과 id, detail이 객체가 아니거나 JSON으로 4KB 초과면 ValueError (API는 400).
+    """
     if type not in EVENT_TYPES:
         raise ValueError(f"모르는 type: {type}")
+    if detail is not None and not isinstance(detail, dict):
+        raise ValueError("detail은 객체")
+    if detail and len(json.dumps(detail, ensure_ascii=False).encode()) > EVENT_DETAIL_MAX_BYTES:
+        raise ValueError("detail이 4KB 초과")
     if not _run("SELECT 1 FROM generations WHERE id=?", (gid,)):
-        return False
+        raise ValueError(f"없는 결과: {gid}")
     _run(
         "INSERT INTO events (generation_id, client_id, type, detail_json) VALUES (?, ?, ?, ?)",
         (gid, client_id, type, json.dumps(detail, ensure_ascii=False) if detail else None),
@@ -219,7 +242,6 @@ def add_event(gid: str, client_id: str, type: str, detail: dict | None = None) -
             "UPDATE generations SET downloaded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=? AND downloaded_at IS NULL",
             (gid,),
         )
-    return True
 
 
 def get_generation(gid: str) -> dict | None:

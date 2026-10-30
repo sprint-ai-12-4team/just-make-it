@@ -196,7 +196,6 @@ class FamilyResponse(BaseModel):
 EventType = Literal[
     "download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"
 ]
-EVENT_DETAIL_MAX_BYTES = 4096
 
 
 class EventRequest(BaseModel):
