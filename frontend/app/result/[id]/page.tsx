@@ -1,15 +1,17 @@
 "use client";
 
 import { CutoutEditor } from "@/components/CutoutEditor";
+import { GenProgress } from "@/components/GenProgress";
 import { Shell } from "@/components/Shell";
 import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
 import { Chip, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { save } from "@/lib/draw";
+import { canvasOf, placeOnScene } from "@/lib/cutout";
+import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
-import { loadCopies, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
-import { ADJUSTMENTS, type Generation, type Purpose } from "@/lib/types";
+import { drawText, loadCopies, loadFont, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
+import { ADJUSTMENTS, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
 import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -36,6 +38,19 @@ const COVERED: Partial<Record<Purpose, { label: string; boxes: { left: number; t
     boxes: [{ left: 86, top: 86, width: 12, height: 10 }],
   },
 };
+
+const pngOf = (c: HTMLCanvasElement) => new Promise<Blob>((ok, no) => c.toBlob((b) => (b ? ok(b) : no(new Error("사진을 만들지 못했어요."))), "image/png"));
+
+/** keep_product 결과: AI 장면 + 사용자 상품 + 글자를 합쳐 {글자 없는 그림, 최종 그림} (api_spec_next 4장) */
+async function composeScene(g: Generation) {
+  const [scene, product] = await Promise.all([loadImage(g.background_url!), loadImage(g.product_url!)]);
+  const bg = placeOnScene(scene, product);
+  const text = textOf(g);
+  await loadFont(TEXT_STYLES.find((s) => s.id === text.style) ?? TEXT_STYLES[0]).catch(() => {});
+  const out = canvasOf(bg.width, bg.height);
+  drawText(out, bg, text);
+  return { bg, out, text };
+}
 
 export default function Page() {
   return (
@@ -65,43 +80,87 @@ function ResultPage() {
   const [familyFromServer, setFamilyFromServer] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
+  const composed = useRef(""); // 개발 모드에서 effect가 두 번 돌아도 한 번만 올림
 
   useEffect(() => {
     setCopies(loadCopies(id));
-    api
-      .getGeneration(id)
-      .then((r) => {
-        setG(r);
-        setFamily(remember(r.id, r.parent_id, r.image_url));
-        // 서버 목록이 있으면 다른 기기에서 만든 것까지. 없으면(404) 이 브라우저 기록 그대로
-        api
-          .getFamily(r.id)
-          .then((items) => {
-            setFamily(items.map((f) => ({ id: f.id, img: f.image_url })));
-            setFamilyFromServer(true);
-          })
-          .catch(() => {});
-      })
-      .catch((e) => setError(e.message));
+    let alive = true;
+    let timer = 0;
+    // 만드는 중이면 2초마다 다시 조회 (api_spec V3). 잠깐 끊긴 연결(status 0)도 다시 시도
+    const poll = () =>
+      api
+        .getGeneration(id)
+        .then((r) => {
+          if (!alive) return;
+          setG(r);
+          if (r.status === "processing") timer = window.setTimeout(poll, 2000);
+          if (r.status === "success") loadFamily(r);
+        })
+        .catch((e) => {
+          if (!alive) return;
+          if (e instanceof ApiError && e.status === 0) timer = window.setTimeout(poll, 2000);
+          else setError(e.message);
+        });
+    const loadFamily = (r: Generation) => {
+      setFamily(remember(r.id, r.parent_id, r.image_url));
+      // 서버 목록이 있으면 다른 기기에서 만든 것까지. 없으면(404) 이 브라우저 기록 그대로
+      api
+        .getFamily(r.id)
+        .then((items) => {
+          setFamily(items.map((f) => ({ id: f.id, img: f.image_url })));
+          setFamilyFromServer(true);
+        })
+        .catch(() => {});
+    };
+    poll();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
   }, [id]);
+
+  // 상품 그대로 + AI 장면: 처음 열 때 합쳐서 서버에 저장 → 이후 링크·글자 고치기·배경 지우기는 합친 그림으로
+  useEffect(() => {
+    if (g?.status !== "success" || !g.product_url || g.edited || !g.background_url || composed.current === g.id) return;
+    composed.current = g.id;
+    composeScene(g)
+      .then(async ({ bg, out, text }) => {
+        try {
+          setG(await api.saveImage(g.id, await pngOf(out), await pngOf(bg), g.message));
+        } catch {
+          // 서버에 못 올려도 이 브라우저에서는 합친 그림으로 보여 주고 고칠 수 있게
+          setBgSrc(URL.createObjectURL(await pngOf(bg)));
+          setEdit(text);
+        }
+      })
+      .catch((e) => {
+        console.warn("상품 합치기 실패", e);
+        setError("상품을 배경에 올리지 못했어요. 새로고침해 주세요.");
+      });
+  }, [g]);
 
   const startEdit = (r: Generation) => setEdit(textOf(r));
 
-  async function remake(adjustments: string[]) {
-    if (!g?.input) return;
+  /** 새로 만들기 시작 → 새 결과 화면에서 진행 상황을 봄 */
+  async function start(input: GenerateInput) {
     setBusy(true);
     setError("");
     try {
-      // 원본 사진은 서버가 parent_id로 다시 씀. 직접 고친 문구를 이어 씀 (g.input.message는 처음 입력값)
-      api.logEvent(g.id, "remake", { adjustments });
-      const message = edit?.text.trim() || g.message;
-      const next = await api.generate({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
-      saveCopies(next.id, copies);
-      router.push(`/result/${next.id}`);
+      const next = await api.startGeneration(input);
+      saveCopies(next, copies);
+      router.push(`/result/${next}`);
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
     }
+  }
+
+  function remake(adjustments: string[]) {
+    if (!g?.input) return;
+    // 원본 사진은 서버가 parent_id로 다시 씀. 직접 고친 문구를 이어 씀 (g.input.message는 처음 입력값)
+    api.logEvent(g.id, "remake", { adjustments });
+    const message = edit?.text.trim() || g.message;
+    start({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
   }
 
   async function copyLink() {
@@ -132,12 +191,38 @@ function ResultPage() {
     }
   }
 
-  if (busy) return <Waiting title="새로 만들고 있어요" hint="보통 10~30초 걸려요. 이 화면을 닫지 말아 주세요." />;
+  // 합치기 전 장면(상품 없음)이 잠깐 보이지 않게
+  if (g?.status === "success" && g.product_url && !g.edited && !bgSrc && !error) return <Waiting title="상품을 배경에 올리고 있어요" hint="잠깐이면 돼요." />;
+  if (busy) return <Waiting title="만들기를 시작했어요" hint="곧 진행 상황을 보여 드려요." />;
   if (!g)
     return error ? (
-      <Notice action={<Link href="/" className="btn-fill">처음으로</Link>}>{error}</Notice>
+      <Notice
+        action={
+          <Link href="/" className="btn-fill">
+            처음으로
+          </Link>
+        }
+      >
+        {error}
+      </Notice>
     ) : (
       <div aria-busy className="aspect-square animate-pulse rounded-card bg-mist" />
+    );
+
+  if (g.status === "processing") return <GenProgress message={g.message} progress={g.progress} />;
+  if (g.status === "error")
+    return (
+      <Notice
+        action={
+          g.input && (
+            <button type="button" className="btn-fill" onClick={() => start({ ...g.input!, style: g.input!.style ?? null, parent_id: g.parent_id ?? null })}>
+              <RefreshCw aria-hidden className="size-5" /> 다시 만들기
+            </button>
+          )
+        }
+      >
+        그림을 만들지 못했어요. 잠시 후 다시 만들어 주세요.
+      </Notice>
     );
 
   const covered = g.input ? COVERED[g.input.purpose] : undefined;
@@ -175,20 +260,11 @@ function ResultPage() {
               node: (
                 // w-fit: 가려지는 곳 표시(%)가 그림 크기에 맞게
                 <div className="relative mx-auto w-fit">
-                  {edit && g.background_url ? (
-                    <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} />
-                  ) : (
-                    original.node
-                  )}
+                  {edit && g.background_url ? <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} /> : original.node}
                   {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
                   {showCovered &&
                     covered?.boxes.map((b, i) => (
-                      <div
-                        key={i}
-                        aria-hidden
-                        className="pointer-events-none absolute bg-ink/50"
-                        style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }}
-                      />
+                      <div key={i} aria-hidden className="pointer-events-none absolute bg-ink/50" style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }} />
                     ))}
                 </div>
               ),
@@ -213,11 +289,7 @@ function ResultPage() {
         <>
           <div className="grid gap-3 sm:grid-cols-2">
             {edit ? (
-              <button
-                type="button"
-                className="btn-fill"
-                onClick={() => (save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError), api.logEvent(g.id, "download", { edited: true }))}
-              >
+              <button type="button" className="btn-fill" onClick={() => (save(canvasRef.current, `광고-${edit.text.slice(0, 10)}.png`, setError), api.logEvent(g.id, "download", { edited: true }))}>
                 <Download aria-hidden className="size-5" /> 내 기기에 저장
               </button>
             ) : (
@@ -280,7 +352,9 @@ function ResultPage() {
           <legend className="label">이렇게 바꿔 주세요 (여러 개 골라도 돼요)</legend>
           <div className="flex flex-wrap gap-2">
             {ADJUSTMENTS.map((a) => (
-              <Chip key={a} on={picked.includes(a)} onClick={() => setPicked(picked.includes(a) ? picked.filter((x) => x !== a) : [...picked, a])}>{a}</Chip>
+              <Chip key={a} on={picked.includes(a)} onClick={() => setPicked(picked.includes(a) ? picked.filter((x) => x !== a) : [...picked, a])}>
+                {a}
+              </Chip>
             ))}
           </div>
         </fieldset>
@@ -301,7 +375,11 @@ function ResultPage() {
           <ul className="grid grid-cols-3 gap-3 sm:grid-cols-4">
             {family.map((f, i) => (
               <li key={f.id}>
-                <Link href={`/result/${f.id}`} aria-current={f.id === g.id ? "page" : undefined} className={`block overflow-hidden rounded-btn border-2 ${f.id === g.id ? "border-ink" : "border-mist hover:border-charcoal"}`}>
+                <Link
+                  href={`/result/${f.id}`}
+                  aria-current={f.id === g.id ? "page" : undefined}
+                  className={`block overflow-hidden rounded-btn border-2 ${f.id === g.id ? "border-ink" : "border-mist hover:border-charcoal"}`}
+                >
                   {/* eslint-disable-next-line @next/next/no-img-element -- 작은 미리보기 */}
                   <img src={f.img} alt={`${i + 1}번째 결과${f.id === g.id ? " (지금 보는 것)" : ""}`} className="block aspect-square w-full object-cover" />
                 </Link>
@@ -315,11 +393,12 @@ function ResultPage() {
           <History aria-hidden className="size-5" /> 바로 전 결과로 돌아가기
         </Link>
       )}
-      <Link href="/" className="btn-line">처음부터 새로 만들기</Link>
+      <Link href="/" className="btn-line">
+        처음부터 새로 만들기
+      </Link>
     </div>
   );
 }
-
 
 interface EditorProps {
   state: TextState;
@@ -335,13 +414,17 @@ function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
       <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
       <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
       <div>
-        <label htmlFor="t" className="label">문구</label>
+        <label htmlFor="t" className="label">
+          문구
+        </label>
         <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
         <RiskyWords text={state.text} />
         {copies.length > 0 && (
           <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
             {copies.map((c) => (
-              <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>{c}</Chip>
+              <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>
+                {c}
+              </Chip>
             ))}
           </div>
         )}
@@ -357,17 +440,10 @@ function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
         </div>
       </fieldset>
       <div>
-        <label htmlFor="size" className="label">글자 크기</label>
-        <input
-          id="size"
-          type="range"
-          min={0.6}
-          max={1.6}
-          step={0.05}
-          value={state.scale}
-          onChange={(e) => onChange({ ...state, scale: Number(e.target.value) })}
-          className="w-full accent-ink"
-        />
+        <label htmlFor="size" className="label">
+          글자 크기
+        </label>
+        <input id="size" type="range" min={0.6} max={1.6} step={0.05} value={state.scale} onChange={(e) => onChange({ ...state, scale: Number(e.target.value) })} className="w-full accent-ink" />
       </div>
       <button type="button" className="btn-line" onClick={onReset}>
         <Undo2 aria-hidden className="size-5" /> 처음 이미지로 돌아가기

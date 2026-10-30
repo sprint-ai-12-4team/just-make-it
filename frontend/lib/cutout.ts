@@ -158,14 +158,17 @@ export function cutOf(img: HTMLImageElement, alpha: Uint8ClampedArray): HTMLCanv
   return cut;
 }
 
-/** 배경색 + 상품 층을 canvas에 그림 (미리보기·저장 공용). 크기는 원본 사진 그대로 */
+/** 배경색 + 상품 층을 canvas에 그림 (미리보기·저장 공용). 크기는 원본 사진 그대로. fill이 ""면 투명 */
 export function compose(canvas: HTMLCanvasElement, cut: HTMLCanvasElement, fill: string, place: Place) {
   const { width: w, height: h } = cut;
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = fill;
-  ctx.fillRect(0, 0, w, h);
+  if (fill) {
+    // 빈 값이면 투명 그대로 (배경은 AI 장면으로, api_spec_next 4장)
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, w, h);
+  }
   ctx.setTransform(placeMatrix(w, h, place));
   ctx.drawImage(cut, 0, 0);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -183,4 +186,50 @@ export function canvasOf(w: number, h: number) {
   c.width = w;
   c.height = h;
   return c;
+}
+
+/** 투명하지 않은 부분의 사각형 (상품만 잘라 쓰려고). 다 투명하면 null */
+export function alphaBox(alpha: ArrayLike<number>, w: number, h: number) {
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (alpha[y * w + x] > 8) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        y1 = y;
+      }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+/** 장면 가운데 아래에 상품을 놓을 자리: 가로 60%·세로 55% 안, 바닥은 높이의 92% (api_spec_next 4장의 비운 구도) */
+export function fitBottom(pw: number, ph: number, W: number, H: number) {
+  const s = Math.min((W * 0.6) / pw, (H * 0.55) / ph);
+  const w = pw * s, h = ph * s;
+  return { x: (W - w) / 2, y: H * 0.92 - h, w, h };
+}
+
+/** AI 장면 + 사용자 상품(픽셀 그대로) + 바닥 그림자 → 글자 없는 그림 */
+export function placeOnScene(scene: HTMLImageElement, product: HTMLImageElement): HTMLCanvasElement {
+  const W = scene.naturalWidth, H = scene.naturalHeight;
+  const out = canvasOf(W, H);
+  const ctx = out.getContext("2d")!;
+  ctx.drawImage(scene, 0, 0);
+  const rgba = pixelsOf(product);
+  const pw = product.naturalWidth, ph = product.naturalHeight;
+  const box = alphaBox(rgba.filter((_, i) => i % 4 === 3), pw, ph) ?? { x: 0, y: 0, w: pw, h: ph };
+  const r = fitBottom(box.w, box.h, W, H);
+  // 그림자: 흐린 타원 (ctx.filter 없이 그라디언트라 사파리에서도 같음)
+  const cx = W / 2, cy = r.y + r.h, rx = r.w * 0.45, ry = Math.max(4, r.h * 0.06);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(1, ry / rx);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  g.addColorStop(0, "rgba(0,0,0,0.35)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(-rx, -rx, rx * 2, rx * 2);
+  ctx.restore();
+  ctx.drawImage(product, box.x, box.y, box.w, box.h, r.x, r.y, r.w, r.h);
+  return out;
 }

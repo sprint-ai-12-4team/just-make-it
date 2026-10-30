@@ -13,6 +13,7 @@ export interface GenerateInput {
   adjustments: string[];
   parent_id: string | null;
   image_model: ImageModel;
+  keep_product?: boolean; // 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장)
 }
 
 export type TextPosition = "top" | "middle" | "bottom";
@@ -37,8 +38,17 @@ export interface Generation {
   height: number;
   parent_id?: string | null;
   created_at?: string;
-  edited?: boolean; // 브라우저에서 고친 그림을 서버에 저장했으면 true
+  edited?: boolean;
+  progress?: GenProgress | null; // status가 processing일 때 (api_spec V3)
+  product_url?: string | null; // keep_product일 때 배경이 투명한 상품. 프론트가 장면 위에 합침 // 브라우저에서 고친 그림을 서버에 저장했으면 true
   input?: Omit<GenerateInput, "parent_id">;
+}
+
+/** 비동기 생성 진행 상황 (GET /generations/{id}) */
+export interface GenProgress {
+  stage: "queued" | "running";
+  jobs_ahead: number;
+  estimated_seconds: number;
 }
 
 /** 사용 기록 종류 (docs/api_spec_next.md 1장) */

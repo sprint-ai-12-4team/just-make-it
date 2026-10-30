@@ -10,10 +10,11 @@
 | 1 | `POST /events` | 다운로드·링크 복사·다시 만들기 등 사용 기록 | `db.add_event` ✅ | 라우트 연결 |
 | 2 | `POST /generations/{id}/image` | 브라우저에서 고친 그림(배경 지우기·글자)을 서버에 저장 → 공유 링크에도 반영 | `db.replace_image` ✅ | 라우트 연결 |
 | 3 | `GET /generations/{id}/family` | 같은 원본에서 다시 만든 결과 목록 | `db.family` ✅ | 라우트 연결 |
+| 4 | `/generate`의 `keep_product` | 상품 사진 그대로, 배경 장면만 AI로 (10-30 추가) | 프론트 합성 ✅ | 장면 프롬프트·`product_url` (모델·서빙) |
 
 - ✅ = 서비스 쪽 함수와 테스트 준비 완료. 서빙은 **라우트에서 함수만 부르면** 됩니다 (모델·GPU 호출 없음).
-- 세 API 모두 일일 생성 한도에 세지 않습니다.
-- 프론트는 세 API가 아직 없어도(`404`) 지금처럼 동작합니다. 기록은 버리고, 저장은 안내만 띄우고, 목록은 브라우저 기록으로 대신합니다.
+- 1~3은 일일 생성 한도에 세지 않습니다.
+- 프론트는 1~3이 아직 없어도(`404`) 지금처럼 동작합니다. 기록은 버리고, 저장은 안내만 띄우고, 목록은 브라우저 기록으로 대신합니다.
 
 ---
 
@@ -85,11 +86,45 @@
 
 ---
 
+## 4. `keep_product` — 내 상품 사진 그대로, 배경만 AI로 (S1)
+
+AI가 상품을 다시 그리면 모양·로고가 바뀌어 못 쓰는 경우가 많습니다. 상품은 **사용자 사진의 픽셀 그대로** 두고, 서버는 **상품 없는 장면**만 그립니다. 합치기(상품 놓기·그림자·글자)는 프론트가 하고 `POST /generations/{id}/image`로 저장합니다.
+
+```
+프론트: 사진 → 배경 지우기(투명 PNG) ─┐
+                                       ├─ POST /generate (keep_product=true, reference_image=투명 PNG)
+서버:   상품 없는 장면 1장 생성 ───────┘     → background_url(장면) + product_url(받은 투명 PNG)
+프론트: 장면 + 상품(가운데 아래) + 그림자 + 글자 → POST /generations/{id}/image (image, background, message)
+```
+
+**요청** — `/generate`·`POST /generations`에 필드 1개 추가
+
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `keep_product` | bool | `false` | `true`면 `reference_image`(배경이 투명한 PNG·WEBP) 필수. 없으면 `400` |
+
+**서버(모델·서빙)가 할 일**
+- 프롬프트: 상품 없이 장면만, **가운데 아래(가로 60%·세로 55%)를 비운 구도**, 글자 없음. 참고 사진은 klein에 넣지 않음 (넣으면 상품을 다시 그림) → VRAM 추가 없음, 1장 그대로
+- 참고 사진은 지금처럼 저장 (`reference_image_path`). `parent_id`로 다시 만들면 같은 상품을 다시 씀
+- 글자: `text_layout.position`은 `top` 고정 (상품이 아래에 오므로)
+- 응답·조회에 `product_url` 추가 (`keep_product`가 아니면 `null`)
+
+**응답** — 지금 형식 + `product_url`
+
+```json
+{"id": "…", "image_url": "…/id.png", "background_url": "…/id-bg.png", "product_url": "…/id-product.png", "text_layout": {"position": "top", "font": "jua", "size_scale": 1.0}, "edited": false}
+```
+
+- 프론트는 `product_url`이 있고 `edited`가 `false`면 바로 합쳐서 저장합니다. 이후 글자 고치기·배경 지우기는 합친 그림(`background_url`)에서 이어집니다.
+- 서버가 아직 `keep_product`를 모르면 필드를 무시하고 보통 결과를 줍니다 (`product_url` 없음) → 프론트는 보통 결과로 보여 줌.
+- 일일 한도·비용은 보통 생성 1장과 같음.
+
+---
+
 ## 나중에 (모델·서빙 준비 후 따로 정함)
 
 | 항목 | 필요한 것 | 로드맵 |
 |---|---|---|
-| 내 사진 그대로, 배경만 바꾸기 | `/generate`에 `keep_product: bool` | S1 · M5 |
 | 가게 키트 (가게명·대표색·로고) | 로그인 필요 → 보류 | S3 |
 
 - 단일 이미지 요청은 **1장만** 만듭니다 (`count` 같은 여러 장 생성 없음). 여러 장은 GPU를 그만큼 더 쓰므로 상세페이지(섹션 5장)에만 씁니다. 더 보고 싶으면 사용자가 "한 번 더 만들기"로 1장씩 만들고, 같은 원본 목록(3장)에서 비교합니다.

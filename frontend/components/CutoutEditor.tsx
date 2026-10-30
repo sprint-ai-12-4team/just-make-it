@@ -5,17 +5,18 @@ import { Chip, Notice } from "@/components/ui";
 import { compose, cutOf, FILLS, floodFill, HOME, pixelsOf, placeMatrix, removeBackground, type Place } from "@/lib/cutout";
 import { loadImage } from "@/lib/draw";
 import { drawText, loadFont, TEXT_STYLES, type TextState } from "@/lib/textStyles";
-import { Check, Eraser, FlipHorizontal2, FlipVertical2, Loader2, Move, Paintbrush, RotateCcw, Undo2 } from "lucide-react";
+import { Check, Eraser, FlipHorizontal2, FlipVertical2, Loader2, Move, Paintbrush, RotateCcw, Sparkles, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 interface Props {
   photoUrl: string;
   name: string;
-  onDone: (file: File) => void;
+  onDone: (file: File, scene: boolean) => void; // scene: 배경을 투명하게 두고 AI 장면을 고름
   onCancel: () => void;
   cancelLabel?: string;
   text?: TextState | null; // 결과 화면: 미리보기에만 글자를 얹어 보여 줌. 저장되는 사진에는 안 들어감
   compare?: Slide[]; // 미리보기 옆으로 넘겨 볼 다른 그림 (예: 처음 만든 그림)
+  scene?: boolean; // 만들기 화면: 배경 색 대신 "AI가 장면 그리기" 선택지 (api_spec_next 4장)
 }
 
 type Tool = "erase" | "restore" | "move";
@@ -23,7 +24,7 @@ const UNDO_MAX = 20; // ponytail: 마스크가 장당 약 1MB(1024²)라 20번�
 const SAMPLE = 2; // 누른 곳 주변 5x5 평균 색으로 비교 (포토샵 Magic Wand의 "5x5 평균")
 
 /** 올린 사진의 배경을 브라우저에서 지우고, 상품만 남긴 뒤 옮기거나 돌려서 단색 배경 위에 놓음 */
-export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "원래 사진 그대로 쓰기", text, compare = [] }: Props) {
+export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "원래 사진 그대로 쓰기", text, compare = [], scene = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [pixels, setPixels] = useState<Uint8ClampedArray | null>(null);
@@ -112,7 +113,7 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
     compose(out, cut, fill, place);
     out.toBlob((blob) => {
       if (!blob) return setError("사진을 만들지 못했어요. 다시 해 주세요.");
-      onDone(new File([blob], name.replace(/\.\w+$/, "") + "-배경.png", { type: "image/png" }));
+      onDone(new File([blob], name.replace(/\.\w+$/, "") + "-배경.png", { type: "image/png" }), !fill);
     }, "image/png");
   }
 
@@ -157,6 +158,8 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
           role="img"
           aria-label={tool === "move" ? "배경을 지운 미리보기. 끌어서 상품을 옮겨요" : "배경을 지운 미리보기. 누르면 비슷한 색 영역을 지우거나 살려요"}
           className={`preview rounded-card shadow-sm touch-none ${tool === "move" ? "cursor-move" : "cursor-crosshair"}`}
+          // 투명 배경은 바둑판으로 보여 줌
+          style={fill ? undefined : { background: "repeating-conic-gradient(#f3f3f3 0 25%, #fff 0 50%) 0 0 / 24px 24px" }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={() => (grab.current = null)}
@@ -218,7 +221,15 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
       </fieldset>
 
       <fieldset>
-        <legend className="label">3. 배경 색</legend>
+        <legend className="label">3. 배경</legend>
+        {scene && (
+          <div className="mb-4 flex flex-col gap-2">
+            <Chip on={!fill} onClick={() => setFill("")}>
+              <Sparkles aria-hidden className="size-4" /> AI가 어울리는 장면 그리기
+            </Chip>
+            <p className="hint">상품은 사진 그대로 두고, 뒤 배경만 AI가 그려요. 아래 색을 고르면 단색 배경이 돼요.</p>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {FILLS.map((f) => (
             <button
@@ -233,7 +244,7 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
             />
           ))}
           <label className="chip cursor-pointer">
-            <input type="color" value={fill} onChange={(e) => setFill(e.target.value)} className="size-6 cursor-pointer rounded-full border-0 bg-transparent p-0" />
+            <input type="color" value={fill || "#ffffff"} onChange={(e) => setFill(e.target.value)} className="size-6 cursor-pointer rounded-full border-0 bg-transparent p-0" />
             다른 색 고르기
           </label>
         </div>

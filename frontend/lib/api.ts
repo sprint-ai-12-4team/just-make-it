@@ -64,6 +64,15 @@ const real = {
     call<{ copies: string[] }>("/copies", { method: "POST", body: toBody(b) }).then((r) => r.copies),
   generate: (b: GenerateInput, file?: File | null) =>
     call<Generation>("/generate", { method: "POST", body: toBody(b, file) }).then(viaProxy),
+  /** 비동기 생성 시작 → id만 받고 결과 화면이 진행 상황을 조회. 예전 서버(POST /generations 없음)면 동기로 */
+  startGeneration: async (b: GenerateInput, file?: File | null): Promise<string> => {
+    try {
+      return (await call<{ id: string }>("/generations", { method: "POST", body: toBody(b, file) })).id;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return (await real.generate(b, file)).id;
+      throw e;
+    }
+  },
   getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
   startDetailPage: (b: DetailInput, file?: File | null) =>
     call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),

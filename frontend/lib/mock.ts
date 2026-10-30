@@ -20,6 +20,13 @@ function fakeAd(g: Generation & { hue: number }): Generation {
   return { ...g, image_url: fakeImage(w, h, g.hue).replace(encodeURIComponent("</svg>"), encodeURIComponent(text + "</svg>")) };
 }
 
+const dataUrl = (blob: Blob) =>
+  new Promise<string>((ok) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result as string);
+    r.readAsDataURL(blob);
+  });
+
 const ROLES = ["hero", "feature", "feature", "feature", "closing"] as const;
 
 export const mock = {
@@ -27,8 +34,8 @@ export const mock = {
     await wait(800);
     return [`${b.product_name}, ${b.message}`, `지금 ${b.message}!`, `${b.message} — ${b.product_name}에서`];
   },
-  async generate(b: GenerateInput): Promise<Generation> {
-    await wait(1500);
+  async generate(b: GenerateInput, file?: File | null, delay = 1500): Promise<Generation> {
+    await wait(delay);
     const [width, height] = SIZES[b.purpose];
     const message = b.adjustments.includes("텍스트 짧게") ? b.message.slice(0, 8) : b.message;
     const { parent_id, ...input } = b;
@@ -38,28 +45,43 @@ export const mock = {
       message, text_layout: { position: "top", font: "jua", size_scale: 1 }, source: "mock", width, height, parent_id, input,
       created_at: new Date().toISOString(),
     });
+    // keep_product: 서버는 상품 없는 장면만 그리고 받은 투명 사진을 product_url로 돌려줌. 다시 만들 때는 부모 것 재사용
+    if (b.keep_product) {
+      g.product_url = file ? await dataUrl(file) : parent_id ? (load<Generation>(`mock_g_${parent_id}`)?.product_url ?? null) : null;
+      g.image_url = g.background_url!; // 서버도 장면에 글자를 얹지만, 프론트가 바로 합쳐 덮어씀
+    }
     save(`mock_g_${g.id}`, g);
     return g;
   },
-  async getGeneration(id: string) {
+  /** 바로 id를 주고 6초 동안 processing (앞 3초는 대기, 뒤 3초는 그리는 중) */
+  async startGeneration(b: GenerateInput, file?: File | null) {
+    const g = await mock.generate(b, file, 0);
+    save(`mock_ready_${g.id}`, Date.now() + 6000);
+    return g.id;
+  },
+  async getGeneration(id: string): Promise<Generation> {
     const g = load<Generation>(`mock_g_${id}`);
     if (!g) throw Object.assign(new Error("결과를 찾을 수 없어요."), { status: 404 });
+    const left = (load<number>(`mock_ready_${id}`) ?? 0) - Date.now();
+    if (left > 0)
+      return { ...g, status: "processing", image_url: "", progress: { stage: left > 3000 ? "queued" : "running", jobs_ahead: left > 3000 ? 1 : 0, estimated_seconds: left / 1000 } };
     return g;
   },
   async logEvent(id: string, type: EventType, detail?: object) {
     console.info("[mock] event", id, type, detail ?? "");
     return null;
   },
-  async saveImage(id: string, image: Blob, _background?: Blob | null, message?: string): Promise<Generation> {
+  async saveImage(id: string, image: Blob, background?: Blob | null, message?: string): Promise<Generation> {
     await wait(500);
     const g = await mock.getGeneration(id);
     // data URL로 바꿔 sessionStorage에 저장 (새로고침해도 고친 그림이 보이게)
-    const url = await new Promise<string>((ok) => {
-      const r = new FileReader();
-      r.onload = () => ok(r.result as string);
-      r.readAsDataURL(image);
-    });
-    const next = { ...g, image_url: url, edited: true, message: message || g.message };
+    const next = {
+      ...g,
+      image_url: await dataUrl(image),
+      ...(background && { background_url: await dataUrl(background) }),
+      edited: true,
+      message: message || g.message,
+    };
     save(`mock_g_${id}`, next);
     return next;
   },

@@ -1,6 +1,6 @@
 // 실행: node lib/cutout.check.ts  (Magic Wand 영역 채우기 검사)
 import assert from "node:assert/strict";
-import { floodFill } from "./cutout.ts";
+import { alphaBox, fitBottom, floodFill } from "./cutout.ts";
 
 // 4x2 사진: 왼쪽 2칸 흰색, 오른쪽 2칸 검정
 const W = [255, 255, 255, 255];
@@ -32,3 +32,13 @@ assert.deepEqual([...floodFill(dot, new Uint8ClampedArray(9).fill(255), 3, 3, 1,
 // 누른 점(잡티)도 같이 지워짐
 assert.equal(floodFill(dot, new Uint8ClampedArray(9).fill(255), 3, 3, 1, 1, 0, 120, 1).filter((v) => v === 0).length, 9);
 console.log("sample ok");
+
+// 상품 사각형: 투명하지 않은 곳만 (3x3 중 가운데 아래 2칸)
+assert.deepEqual(alphaBox([0, 0, 0, 0, 255, 0, 0, 255, 0], 3, 3), { x: 1, y: 1, w: 1, h: 2 });
+assert.equal(alphaBox([0, 0, 0, 0], 2, 2), null);
+// 놓을 자리: 가운데, 바닥 92%, 가로 60%·세로 55%를 넘지 않음
+const wide = fitBottom(200, 100, 1000, 1000);
+assert.deepEqual(wide, { x: 200, y: 620, w: 600, h: 300 });
+const tall = fitBottom(100, 400, 1000, 1000);
+assert.ok(tall.h <= 550 + 1e-9 && tall.w <= 600 && Math.abs(tall.y + tall.h - 920) < 1e-9 && Math.abs(tall.x + tall.w / 2 - 500) < 1e-9);
+console.log("scene ok");
