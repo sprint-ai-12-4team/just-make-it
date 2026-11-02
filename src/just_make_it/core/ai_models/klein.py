@@ -21,6 +21,43 @@ STEPS = 4
 GUIDANCE = 1.0
 
 
+def load_text_encoder(repo, bits, torch):
+    """텍스트 인코더를 bitsandbytes로 줄여서 GPU에 바로 불러옵니다.
+
+    Args:
+        repo: 원본 저장소
+        bits: 비트 수 (16, 8, 4)
+        torch: 불러온 torch 모듈
+
+    Returns:
+        Qwen3ForCausalLM: 줄인 텍스트 인코더. 16이면 None (파이프라인이 원본을 불러옴)
+
+    Raises:
+        ValueError: 비트 수가 16, 8, 4가 아닐 때
+    """
+    if bits == 16:
+        return None
+    from transformers import BitsAndBytesConfig, Qwen3ForCausalLM
+
+    if bits == 8:
+        quant = BitsAndBytesConfig(load_in_8bit=True)
+    elif bits == 4:
+        quant = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    else:
+        raise ValueError(f"텍스트 인코더 비트는 16, 8, 4 중 하나여야 합니다: {bits}")
+    return Qwen3ForCausalLM.from_pretrained(
+        repo,
+        subfolder="text_encoder",
+        quantization_config=quant,
+        torch_dtype=torch.bfloat16,
+        device_map={"": "cuda"},
+    )
+
+
 class KleinImageModel:
     """FLUX.2 [klein] 4B fp8. 참고 사진 기능을 지원합니다."""
 
@@ -30,6 +67,7 @@ class KleinImageModel:
         fp8_repo=config.KLEIN_FP8_REPO,
         fp8_file=config.KLEIN_FP8_FILE,
         cpu_offload=config.KLEIN_CPU_OFFLOAD,
+        text_encoder_bits=config.KLEIN_TEXT_ENCODER_BITS,
     ):
         """모델을 내려받아 GPU에 올립니다.
 
@@ -38,6 +76,7 @@ class KleinImageModel:
             fp8_repo: fp8 본체 파일이 있는 저장소
             fp8_file: fp8 본체 파일 이름
             cpu_offload: True면 GPU 메모리를 아끼는 대신 느려짐
+            text_encoder_bits: 텍스트 인코더 비트 수 (16, 8, 4). 16이 아니면 cpu_offload는 무시됨
 
         Raises:
             ImageGenerationError: GPU가 없거나 모델을 불러오지 못했을 때
@@ -56,13 +95,20 @@ class KleinImageModel:
             self.torch = torch
             checkpoint = hf_hub_download(fp8_repo, fp8_file)
             transformer = load_fp8_transformer(checkpoint, repo)
+            text_encoder = load_text_encoder(repo, text_encoder_bits, torch)
+            extra = {"text_encoder": text_encoder} if text_encoder is not None else {}
             self.pipe = Flux2KleinPipeline.from_pretrained(
-                repo, transformer=transformer, torch_dtype=torch.bfloat16
+                repo, transformer=transformer, torch_dtype=torch.bfloat16, **extra
             )
-            if cpu_offload:
-                self.pipe.enable_model_cpu_offload()
+            if text_encoder is None:
+                if cpu_offload:
+                    self.pipe.enable_model_cpu_offload()
+                else:
+                    self.pipe.to("cuda")
             else:
-                self.pipe.to("cuda")
+                # 줄인 텍스트 인코더는 이미 GPU에 있고 옮길 수 없어서 나머지만 옮김
+                self.pipe.transformer.to("cuda")
+                self.pipe.vae.to("cuda")
         except Exception as e:
             raise ImageGenerationError(f"{self.model} 불러오기 실패: {e}") from e
 

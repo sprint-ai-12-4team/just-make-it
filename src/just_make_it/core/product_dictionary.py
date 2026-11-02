@@ -12,6 +12,14 @@ PRODUCT_DICTIONARY = {
         ),
         "local_ok": False,
     },
+    "떡볶이": {
+        "description": (
+            "Korean tteokbokki: chewy cylindrical white rice cakes simmered in a thick glossy "
+            "bright red gochujang sauce, with flat fish cake slices and chopped green onions, "
+            "served in a wide shallow pan"
+        ),
+        "local_ok": False,
+    },
 }
 
 

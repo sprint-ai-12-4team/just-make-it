@@ -33,6 +33,10 @@ ENV UV_LINK_MODE=copy
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev ${UV_EXTRAS} --no-install-project
 
+# 소스 코드 복사 후 프로젝트 설치
+COPY src/ ./src/
+RUN uv sync --frozen --no-dev --extra gpu
+
 
 # ----- Stage 2: Runtime (실행 환경) -----
 # CUDA 런타임은 torch 휠(PyPI, CUDA 13.0)에 들어 있어서 CUDA 베이스 이미지가 필요 없다.
