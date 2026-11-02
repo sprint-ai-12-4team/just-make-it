@@ -1,21 +1,21 @@
 "use client";
 
 import { CutoutEditor } from "@/components/CutoutEditor";
-import { Chip, FieldError, Notice, RiskyWords, Waiting } from "@/components/ui";
+import { Chip, FieldError, Notice, RiskyWords, Steps, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { shrinkPhoto } from "@/lib/draw";
 import { saveCopies } from "@/lib/textStyles";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
-import { ChevronLeft, ImagePlus, Scissors, Sparkles, X } from "lucide-react";
+import { ChevronLeft, ImagePlus, MessageCircle, Scissors, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const PHOTO_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const MAX_PHOTO = 10 * 1024 * 1024;
 
-export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purposeTitle: string }) {
+export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: { purpose: Purpose; purposeTitle: string; consultId?: string; copyIndex?: number }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
@@ -34,6 +34,23 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
   const [tried, setTried] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const [fromConsult, setFromConsult] = useState(false);
+
+  // Phase 2: 상담 기획서로 칸을 미리 채움. 상담을 못 불러와도 빈 칸으로 그대로 만들 수 있음
+  useEffect(() => {
+    if (!consultId) return;
+    api
+      .getConsult(consultId)
+      .then(({ brief }) => {
+        if (!brief) return;
+        setName(brief.product_name);
+        setMessage(brief.copies?.[copyIndex] ?? brief.message);
+        if (brief.style && STYLES.includes(brief.style)) setStyle(brief.style);
+        setFromConsult(true);
+      })
+      .catch(() => {});
+  }, [consultId, copyIndex]);
 
   const ready = name.trim() && message.trim();
 
@@ -86,7 +103,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
         router.push(`/detail/${id}`);
       } else {
         const gid = await api.startGeneration(
-          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel, ...(keepProduct && { keep_product: true }) },
+          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel, ...(keepProduct && { keep_product: true }), ...(fromConsult && { consult_id: consultId }) },
           photo,
         );
         saveCopies(gid, copies);
@@ -117,11 +134,31 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
       className="flex flex-col gap-10"
     >
       <div>
-        <Link href="/#start" className="-ml-2 inline-flex min-h-[44px] items-center gap-1 rounded-btn px-2 hint">
-          <ChevronLeft aria-hidden className="size-5" /> 다른 곳 고르기
-        </Link>
+        {consultId ? (
+          <>
+            <Link href={`/consult?id=${consultId}`} className="-ml-2 inline-flex min-h-[44px] items-center gap-1 rounded-btn px-2 hint">
+              <ChevronLeft aria-hidden className="size-5" /> 상담으로 돌아가기
+            </Link>
+            <div className="mt-2">
+              <Steps current={2} />
+            </div>
+          </>
+        ) : (
+          <Link href="/#start" className="-ml-2 inline-flex min-h-[44px] items-center gap-1 rounded-btn px-2 hint">
+            <ChevronLeft aria-hidden className="size-5" /> 다른 곳 고르기
+          </Link>
+        )}
         <p className="mt-2 inline-block rounded-full bg-honey px-4 py-1 text-caption font-medium">{purposeTitle}</p>
         <h1 className="mt-3 text-h font-bold">무엇을 알리고 싶으세요?</h1>
+        {fromConsult ? (
+          <p className="mt-2 hint">상담 내용으로 채웠어요. 마음대로 고쳐도 돼요.</p>
+        ) : (
+          !consultId && (
+            <Link href={`/consult?purpose=${purpose}`} className="mt-3 inline-flex min-h-[44px] items-center gap-1.5 rounded-btn font-medium underline underline-offset-4">
+              <MessageCircle aria-hidden className="size-5" /> 뭘 써야 할지 모르겠다면 AI와 먼저 정해 보기
+            </Link>
+          )
+        )}
       </div>
 
       {purpose === "commerce" && (

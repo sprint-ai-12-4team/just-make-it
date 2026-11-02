@@ -14,6 +14,7 @@ export interface GenerateInput {
   parent_id: string | null;
   image_model: ImageModel;
   keep_product?: boolean; // 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장)
+  consult_id?: string; // AI 상담에서 넘어왔으면 (api_spec_consult 3-4). 모르는 서버는 무시함
 }
 
 export type TextPosition = "top" | "middle" | "bottom";
@@ -49,10 +50,92 @@ export interface GenProgress {
   stage: "queued" | "running";
   jobs_ahead: number;
   estimated_seconds: number;
+  // 아래는 api_spec_consult 1장. 예전 서버는 안 보냄
+  elapsed_seconds?: number;
+  overdue?: boolean;
+  phase?: "text" | "image" | "saving" | null;
+  step?: number | null;
+  steps?: number | null;
 }
 
-/** 사용 기록 종류 (docs/api_spec_next.md 1장) */
-export type EventType = "download" | "copy_link" | "remake" | "edit_text" | "cutout" | "pick_copy";
+/** 사용 기록 종류 (docs/api_spec_next.md 1장 + api_spec_consult 5장) */
+export type EventType = "download" | "copy_link" | "remake" | "edit_text" | "cutout" | "pick_copy" | "add_qr" | "tip_click" | "copy_kit";
+
+/** 대기 중 정보 카드 (api_spec_consult 2장) */
+export interface Tip {
+  id: string;
+  kind: "season" | "howto" | "platform" | "law" | "support" | "news";
+  title: string;
+  body: string | null;
+  action?: { label: string; href: string } | null;
+  source?: { name: string; url: string } | null;
+}
+
+/** AI 상담 결과 = 광고 기획서 (api_spec_consult 3장). 쓰는 건 terra 1회 */
+export interface Brief {
+  category: string;
+  goal: string;
+  product_name: string;
+  period: string | null; // 행사 기간. 사장님이 답한 그대로 (지어내지 않음)
+  strengths: string[];
+  audience: string;
+  purpose: Purpose; // 만들기 화면 목적 (크기)
+  channel: string;
+  message: string; // 핵심 메시지
+  copies: string[]; // 그림에 넣을 문구 2안
+  style: string | null;
+  reason: string; // 이렇게 제안하는 이유
+  next_tips: string[];
+}
+
+export interface ConsultMessage {
+  role: "assistant" | "user";
+  text: string;
+  chips?: string[];
+}
+
+/** 상담 한 턴의 응답 */
+export interface ConsultTurn {
+  id: string;
+  reply: string;
+  chips: string[];
+  allow_free_text: boolean;
+  turn: number;
+  max_turns: number;
+  brief: Brief | null;
+  ended?: boolean;
+  edits_left?: number; // 기획서를 더 고칠 수 있는 횟수 (제안 2회)
+}
+
+export interface Consult {
+  id: string;
+  messages: ConsultMessage[];
+  brief: Brief | null;
+  ended?: boolean;
+  edits_left?: number;
+}
+
+export type ConvertFormat =
+  | "instagram_post"
+  | "instagram_hashtags"
+  | "instagram_location"
+  | "instagram_story"
+  | "naver_coupon"
+  | "naver_blog_title"
+  | "store_description";
+
+export type ConvertResult = string | string[] | { title: string; condition: string; period: string };
+
+/** 게시 문구 키트 1차 형식. 채널별로 묶어서 보여 줌 */
+export const CONVERT_FORMATS: { id: ConvertFormat; title: string; channel: string }[] = [
+  { id: "instagram_post", title: "본문", channel: "인스타그램" },
+  { id: "instagram_hashtags", title: "해시태그", channel: "인스타그램" },
+  { id: "instagram_location", title: "위치 태그 후보", channel: "인스타그램" },
+  { id: "instagram_story", title: "스토리 한 줄", channel: "인스타그램" },
+  { id: "naver_coupon", title: "쿠폰 문구", channel: "네이버" },
+  { id: "naver_blog_title", title: "블로그 제목 3개", channel: "네이버" },
+  { id: "store_description", title: "상품 설명", channel: "스마트스토어 · 쿠팡" },
+];
 
 export interface FamilyItem {
   id: string;

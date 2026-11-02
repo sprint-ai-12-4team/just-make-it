@@ -1,7 +1,9 @@
 "use client";
 
 import { CutoutEditor } from "@/components/CutoutEditor";
+import { CopyKit } from "@/components/CopyKit";
 import { GenProgress } from "@/components/GenProgress";
+import { QrStamp } from "@/components/QrStamp";
 import { Shell } from "@/components/Shell";
 import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
@@ -11,7 +13,7 @@ import { canvasOf, placeOnScene } from "@/lib/cutout";
 import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
 import { drawText, loadCopies, loadFont, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
-import { ADJUSTMENTS, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
+import { ADJUSTMENTS, type Brief, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
 import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -80,7 +82,14 @@ function ResultPage() {
   const [familyFromServer, setFamilyFromServer] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
+  const [brief, setBrief] = useState<Brief | null>(null);
   const composed = useRef(""); // 개발 모드에서 effect가 두 번 돌아도 한 번만 올림
+
+  // 상담에서 왔으면 기획서의 채널·기간을 게시 문구 키트에 씀. 못 불러와도 그대로 동작
+  const consultId = g?.input?.consult_id;
+  useEffect(() => {
+    if (consultId) api.getConsult(consultId).then((c) => setBrief(c.brief), () => {});
+  }, [consultId]);
 
   useEffect(() => {
     setCopies(loadCopies(id));
@@ -191,6 +200,25 @@ function ResultPage() {
     }
   }
 
+  /** QR 넣은 그림을 링크에 저장. 서버에 저장 기능이 없으면(404) 내 기기에 저장 */
+  async function saveQr(out: HTMLCanvasElement, host: string) {
+    if (!g) return;
+    const message = edit?.text.trim() || g.message;
+    const background = bgSrc ? await fetch(bgSrc).then((r) => r.blob()) : null;
+    try {
+      setG(await api.saveImage(g.id, await pngOf(out), background, message));
+      setEdit(null);
+      if (bgSrc) URL.revokeObjectURL(bgSrc);
+      setBgSrc("");
+      setUploaded(true);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+      save(out, `광고-QR-${message.slice(0, 10)}.png`, setError);
+      setError("아직 링크에 저장할 수 없어서 QR 넣은 그림을 내 기기에 저장했어요.");
+    }
+    api.logEvent(g.id, "add_qr", { host });
+  }
+
   // 합치기 전 장면(상품 없음)이 잠깐 보이지 않게
   if (g?.status === "success" && g.product_url && !g.edited && !bgSrc && !error) return <Waiting title="상품을 배경에 올리고 있어요" hint="잠깐이면 돼요." />;
   if (busy) return <Waiting title="만들기를 시작했어요" hint="곧 진행 상황을 보여 드려요." />;
@@ -209,7 +237,7 @@ function ResultPage() {
       <div aria-busy className="aspect-square animate-pulse rounded-card bg-mist" />
     );
 
-  if (g.status === "processing") return <GenProgress message={g.message} progress={g.progress} />;
+  if (g.status === "processing") return <GenProgress g={g} />;
   if (g.status === "error")
     return (
       <Notice
@@ -344,6 +372,13 @@ function ResultPage() {
             </button>
           )}
         </div>
+      )}
+
+      {!cutout && (
+        <>
+          <QrStamp base={() => (edit && canvasRef.current ? Promise.resolve(canvasRef.current) : loadImage(g.image_url))} onSave={saveQr} />
+          <CopyKit key={brief ? "brief" : "plain"} gid={g.id} text={edit?.text.trim() || g.message} productName={g.input?.product_name} brief={brief} />
+        </>
       )}
 
       <section className="card flex flex-col gap-6">
