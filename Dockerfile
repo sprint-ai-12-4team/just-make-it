@@ -20,11 +20,11 @@ COPY pyproject.toml uv.lock README.md ./
 # 가상환경 생성 + 의존성 설치 (프로덕션용, dev 의존성 제외)
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --extra gpu
 
 # 소스 코드 복사 후 프로젝트 설치
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra gpu
 
 
 # ----- Stage 2: Runtime (실행 환경) -----
