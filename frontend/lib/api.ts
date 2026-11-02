@@ -1,5 +1,5 @@
 import { mock } from "./mock";
-import type { DetailInput, DetailPage, GenerateInput, Generation, TextModel } from "./types";
+import type { DetailInput, DetailPage, EventType, FamilyItem, GenerateInput, Generation, TextModel } from "./types";
 
 // next.config.ts의 rewrites로 NEXT_PUBLIC_API_URL에 프록시. https(Vercel) → http(VM) 혼합 콘텐츠·CORS 회피
 const BASE = "/api/backend";
@@ -35,6 +35,7 @@ function toBody(data: object, file?: File | null): BodyInit {
 
 async function call<T>(path: string, init: { method?: string; body?: BodyInit } = {}): Promise<T> {
   const headers: Record<string, string> = { "X-Client-Id": clientId() };
+  // 204(본문 없음)는 아래 res.json()이 null로 처리
   if (typeof init.body === "string") headers["Content-Type"] = "application/json";
   let res: Response;
   try {
@@ -63,11 +64,33 @@ const real = {
     call<{ copies: string[] }>("/copies", { method: "POST", body: toBody(b) }).then((r) => r.copies),
   generate: (b: GenerateInput, file?: File | null) =>
     call<Generation>("/generate", { method: "POST", body: toBody(b, file) }).then(viaProxy),
+  /** 비동기 생성 시작 → id만 받고 결과 화면이 진행 상황을 조회. 예전 서버(POST /generations 없음)면 동기로 */
+  startGeneration: async (b: GenerateInput, file?: File | null): Promise<string> => {
+    try {
+      return (await call<{ id: string }>("/generations", { method: "POST", body: toBody(b, file) })).id;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return (await real.generate(b, file)).id;
+      throw e;
+    }
+  },
   getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
   startDetailPage: (b: DetailInput, file?: File | null) =>
     call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),
   getDetailPage: (id: string) =>
     call<DetailPage>(`/detail-pages/${id}`).then((d) => ({ ...d, sections: d.sections.map(viaProxy) })),
+  // 아래 셋은 docs/api_spec_next.md. 서빙에 아직 없으면 404 → 화면에서 대체 동작
+  /** 사용 기록. 실패해도 화면에는 영향 없게 오류를 버림 */
+  logEvent: (id: string, type: EventType, detail?: object) =>
+    call<null>("/events", { method: "POST", body: toBody({ generation_id: id, type, detail }) }).catch(() => null),
+  /** 브라우저에서 고친 그림을 서버에 저장 → 공유 링크에도 반영 */
+  saveImage: (id: string, image: Blob, background?: Blob | null, message?: string) => {
+    const form = new FormData();
+    form.append("image", image, "image.png");
+    if (background) form.append("background", background, "background.png");
+    if (message) form.append("message", message);
+    return call<Generation>(`/generations/${id}/image`, { method: "POST", body: form }).then(viaProxy);
+  },
+  getFamily: (id: string) => call<{ items: FamilyItem[] }>(`/generations/${id}/family`).then((r) => r.items.map(viaProxy)),
   regenerateSection: (id: string, index: number, adjustments: string[]) =>
     call<unknown>(`/detail-pages/${id}/sections/${index}`, {
       method: "POST",

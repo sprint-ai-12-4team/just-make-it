@@ -51,27 +51,25 @@ export function TextCanvas({ src, state, onChange, canvasRef }: Props) {
 
   if (failed) return <p className="hint">원본 이미지를 불러오지 못했어요. 새로고침해 주세요.</p>;
   return (
-    <div className="overflow-hidden rounded-card bg-mist shadow-sm">
-      <canvas
-        ref={canvasRef}
-        role="img"
-        tabIndex={0}
-        aria-label={`광고 미리보기: ${state.text}. 방향키로 글자를 옮길 수 있어요`}
-        className="block h-auto w-full cursor-move touch-none"
-        onKeyDown={onKeyDown}
-        onPointerDown={(e) => {
-          e.currentTarget.setPointerCapture(e.pointerId);
-          const p = point(e);
-          grab.current = { dx: state.x - p.x, dy: state.y - p.y }; // 잡은 곳 기준으로 움직여 글자가 튀지 않게
-        }}
-        onPointerMove={(e) => {
-          if (!grab.current) return;
-          const p = point(e);
-          onChange({ ...state, x: clamp(p.x + grab.current.dx), y: clamp(p.y + grab.current.dy) });
-        }}
-        onPointerUp={() => (grab.current = null)}
-        onPointerCancel={() => (grab.current = null)}
-      />
-    </div>
+    <canvas
+      ref={canvasRef}
+      role="img"
+      tabIndex={0}
+      aria-label={`광고 미리보기: ${state.text}. 방향키로 글자를 옮길 수 있어요`}
+      className="preview cursor-move touch-none rounded-card bg-mist shadow-sm"
+      onKeyDown={onKeyDown}
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const p = point(e);
+        grab.current = { dx: state.x - p.x, dy: state.y - p.y }; // 잡은 곳 기준으로 움직여 글자가 튀지 않게
+      }}
+      onPointerMove={(e) => {
+        if (!grab.current) return;
+        const p = point(e);
+        onChange({ ...state, x: clamp(p.x + grab.current.dx), y: clamp(p.y + grab.current.dy) });
+      }}
+      onPointerUp={() => (grab.current = null)}
+      onPointerCancel={() => (grab.current = null)}
+    />
   );
 }

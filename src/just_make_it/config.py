@@ -33,6 +33,9 @@ KLEIN_CPU_OFFLOAD = os.getenv("KLEIN_CPU_OFFLOAD", "false").lower() == "true"
 # true면 이미지 한 장을 만들 때마다 klein을 메모리에서 내림 (메모리는 비지만 다음 생성 때 다시 불러와 느려짐)
 KLEIN_UNLOAD_AFTER_USE = os.getenv("KLEIN_UNLOAD_AFTER_USE", "false").lower() == "true"
 
+# 텍스트 인코더 비트 수. 16은 원본(약 7.5GB), 8은 약 4.1GB, 4는 약 2.4GB
+KLEIN_TEXT_ENCODER_BITS = int(os.getenv("KLEIN_TEXT_ENCODER_BITS", "8"))
+
 # 모델 호출 제한 시간(초). 서빙 제한(90초)보다 짧게 두어, 서빙이 포기한 뒤 호출이 뒤에서 계속 돌지 않게 함
 OPENAI_IMAGE_TIMEOUT = float(os.getenv("OPENAI_IMAGE_TIMEOUT", "75"))
 OPENAI_TEXT_TIMEOUT = float(os.getenv("OPENAI_TEXT_TIMEOUT", "30"))

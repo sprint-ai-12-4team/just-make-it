@@ -5,6 +5,7 @@ import time
 import requests
 
 from just_make_it import config
+from just_make_it.core import deadline
 from just_make_it.core.base import TextGenerationError, TextResult
 
 
@@ -57,8 +58,13 @@ class GemmaTextModel:
 
         start = time.perf_counter()
         try:
+            # 서빙이 제한 시간을 걸었으면 남은 시간만 기다림
+            timeout = deadline.timeout_for(self.timeout, "Gemma")
+        except deadline.DeadlineExceeded as e:
+            raise TextGenerationError(str(e)) from e
+        try:
             response = requests.post(
-                f"{self.host}/api/chat", json=body, timeout=self.timeout
+                f"{self.host}/api/chat", json=body, timeout=timeout
             )
         except requests.RequestException as e:
             raise TextGenerationError(f"Gemma 서버에 연결하지 못했습니다: {e}") from e

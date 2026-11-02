@@ -89,7 +89,82 @@ def test_detail_page_flow():
     assert db.get_detail_page(pid)["sections"][4]["image_url"].endswith(f"{new}.png")
 
 
+def test_family_skips_sections_and_limit():
+    def make(parent=None, **kw):
+        gid = db.start_generation("c1", INPUT, backend="local", model="klein", parent_id=parent, **kw)
+        db.finish_generation(gid, b"png", message="", width=1, height=1)
+        return gid
+
+    a = make()
+    for _ in range(3):
+        make(a)
+    assert len(db.family(a, limit=2)) == 2
+    pid = db.start_detail_page("c1", {"product_name": "딸기잼", "message": "국산", "features": []})
+    section = make(detail_page_id=pid, section_index=0)
+    assert db.family(section) is None  # 상세페이지 섹션 제외
+
+
 def test_storage_rejects_path_names():
     for bad in ["../x.png", "a/b.png", ".env"]:
         with pytest.raises(ValueError):
             storage.save(bad, b"")
+
+
+def _png(w: int, h: int) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + w.to_bytes(4, "big") + h.to_bytes(4, "big") + b"rest"
+
+
+def test_replace_image(tmp_path):
+    gid = db.start_generation("c1", INPUT, backend="local", model="klein")
+    g = db.finish_generation(gid, b"png", message="m", width=8, height=4, background=b"bg")
+    assert g["edited"] is False
+
+    first = db.replace_image(gid, _png(8, 4))
+    assert first["edited"] and first["image_url"] != g["image_url"]
+    assert first["background_url"] == g["background_url"]  # 글자 없는 그림은 안 보냈으니 그대로
+
+    second = db.replace_image(gid, _png(8, 4), background=_png(8, 4), message="고친 문구")
+    assert second["message"] == "고친 문구" and first["message"] == "m"
+    assert second["background_url"] != g["background_url"]
+    assert db.background(gid) == _png(8, 4)  # 이후 글자 고치기는 지운 배경 위에
+    images = tmp_path / "images"
+    assert (images / f"{gid}.png").exists() and (images / f"{gid}-bg.png").exists()  # 첫 결과는 남김
+    assert not (images / first["image_url"].rsplit("/", 1)[1]).exists()  # 중간 결과는 지움
+
+    for bad in (b"not png", _png(4, 8)):
+        with pytest.raises(ValueError):
+            db.replace_image(gid, bad)
+
+
+def test_events():
+    gid = db.start_generation("c1", INPUT, backend="local", model="klein")
+    db.add_event("c1", gid, "remake", {"adjustments": ["더 밝게"]})
+    db.add_event("c1", gid, "download")
+    first = db._run("SELECT downloaded_at FROM generations WHERE id=?", (gid,))[0][0]
+    db.add_event("c1", gid, "copy_link")
+    assert first and db._run("SELECT downloaded_at FROM generations WHERE id=?", (gid,))[0][0] == first  # 첫 시각 유지
+    assert db._run("SELECT COUNT(*) FROM events WHERE generation_id=?", (gid,))[0][0] == 3
+
+    for args in (("c1", gid, "hack"), ("c1", "없음", "download"), ("c1", gid, "remake", {"x": "가" * 2000})):
+        with pytest.raises(ValueError):
+            db.add_event(*args)
+
+
+def test_family():
+    def make(parent=None, ok=True):
+        gid = db.start_generation("c1", INPUT, backend="local", model="klein", parent_id=parent)
+        if ok:
+            db.finish_generation(gid, b"png", message="m", width=1, height=1)
+        return gid
+
+    a = make()
+    b = make(a)
+    c = make(b)
+    d = make(a)
+    make(a, ok=False)  # 실패한 결과는 빠짐
+    x = make()  # 따로 만든 것
+    ids = [f["id"] for f in db.family(c)]
+    assert ids == [a, b, c, d] == [f["id"] for f in db.family(a)]
+    assert [f["id"] for f in db.family(x)] == [x]
+    assert db.family(c)[1]["parent_id"] == a and db.family(c)[0]["image_url"].endswith(f"/images/{a}.png")
+    assert db.family("없음") is None

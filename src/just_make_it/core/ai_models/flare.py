@@ -9,6 +9,7 @@ import time
 from openai import OpenAI
 
 from just_make_it import config
+from just_make_it.core import deadline
 from just_make_it.core.base import ImageGenerationError, ImageResult
 
 
@@ -61,11 +62,13 @@ class FlareImageModel:
         }
         start = time.perf_counter()
         try:
+            # 서빙이 제한 시간을 걸었으면 남은 시간만 기다리고 재시도하지 않음
+            client = deadline.openai_client(self.client, "flare")
             if reference_image is not None:
                 request["image"] = ("reference.png", reference_image, "image/png")
-                response = self.client.images.edit(**request)
+                response = client.images.edit(**request)
             else:
-                response = self.client.images.generate(**request)
+                response = client.images.generate(**request)
         except Exception as e:
             raise ImageGenerationError(f"OpenAI 이미지 생성 실패: {e}") from e
 

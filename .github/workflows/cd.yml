@@ -43,8 +43,11 @@ jobs:
           git checkout -f $BRANCH_NAME
           git pull origin $BRANCH_NAME
 
-          # 1. 빌드 중 메모리 부족(OOM) 방지를 위해 Docker 빌드 캐시 및 남은 자원 정리
-          sudo docker builder prune -f
+          # 1. 오래된 빌드 캐시만 정리 (디스크 확보)
+          # 전부 지우면(-f만) torch 등 GPU 의존성 레이어·uv 캐시까지 사라져 배포마다 수 GB를
+          # 다시 받고 설치해서 15분 넘게 걸린다. 최근 7일 캐시는 남겨 코드만 바뀐 배포는 몇 분 안에 끝냄
+          # (빌드 캐시는 디스크만 쓰고 메모리(OOM)와는 상관없음)
+          sudo docker builder prune -f --filter until=168h
 
           # Docker Compose를 이용한 빌드 및 무중단/재시작
           # --build 옵션으로 Dockerfile의 멀티스테이지 빌드 수행 (uv.lock 기반 의존성 설치)

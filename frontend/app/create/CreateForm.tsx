@@ -1,11 +1,13 @@
 "use client";
 
-import { Chip, FieldError, Notice, Waiting } from "@/components/ui";
+import { CutoutEditor } from "@/components/CutoutEditor";
+import { Chip, FieldError, Notice, RiskyWords, Waiting } from "@/components/ui";
 import { api } from "@/lib/api";
 import { shrinkPhoto } from "@/lib/draw";
+import { saveCopies } from "@/lib/textStyles";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
-import { ChevronLeft, ImagePlus, Sparkles, X } from "lucide-react";
+import { ChevronLeft, ImagePlus, Scissors, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -23,6 +25,8 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [photoError, setPhotoError] = useState("");
+  const [cutout, setCutout] = useState(false);
+  const [keepProduct, setKeepProduct] = useState(false); // 배경 지운 상품 + AI 장면 (api_spec_next 4장)
   const [detail, setDetail] = useState(false);
   const [features, setFeatures] = useState(["", "", ""]);
   const [copies, setCopies] = useState<string[]>([]);
@@ -33,19 +37,26 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
 
   const ready = name.trim() && message.trim();
 
-  async function pickPhoto(file: File | undefined) {
+  async function pickPhoto(file: File | undefined, scene = false) {
     setPhotoError("");
+    setKeepProduct(false);
     if (!file) return;
     if (!PHOTO_TYPES.includes(file.type)) return setPhotoError("PNG, JPG, WEBP 사진만 올릴 수 있어요.");
     // 휴대폰 원본은 10MB를 넘기 쉬움 → 줄인 뒤의 크기로 검사
     file = await shrinkPhoto(file).catch(() => file!);
     if (file.size > MAX_PHOTO) return setPhotoError("사진은 10MB 이하로 올려 주세요.");
+    if (photoUrl) URL.revokeObjectURL(photoUrl); // 배경 지운 사진으로 바꿀 때 이전 사진 해제
+    setCutout(false);
     setPhoto(file);
     setPhotoUrl(URL.createObjectURL(file));
+    setKeepProduct(scene);
   }
 
   function removePhoto() {
     URL.revokeObjectURL(photoUrl);
+    setPhotoUrl("");
+    setCutout(false);
+    setKeepProduct(false);
     setPhoto(null);
   }
 
@@ -74,11 +85,14 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
         );
         router.push(`/detail/${id}`);
       } else {
-        const g = await api.generate(
-          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel },
+        const gid = await api.startGeneration(
+          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel, ...(keepProduct && { keep_product: true }) },
           photo,
         );
-        router.push(`/result/${g.id}`);
+        saveCopies(gid, copies);
+        const picked = copies.indexOf(message.trim());
+        if (picked >= 0) api.logEvent(gid, "pick_copy", { index: picked, copy: copies[picked] });
+        router.push(`/result/${gid}`); // 진행 상황은 결과 화면이 보여 줌
       }
     } catch (e) {
       setError((e as Error).message);
@@ -90,7 +104,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
     return detail ? (
       <Waiting title="상세페이지 만들기를 시작했어요" hint="곧 만드는 화면으로 넘어가요." />
     ) : (
-      <Waiting title="이미지를 만들고 있어요" hint="보통 10~30초 걸려요. 이 화면을 닫지 말아 주세요." />
+      <Waiting title="만들기를 시작했어요" hint="곧 진행 상황을 보여 드려요." />
     );
 
   return (
@@ -144,6 +158,7 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
         <p className="mb-2 hint">이미지에 크게 들어갈 문장이에요. 짧을수록 잘 보여요.</p>
         <input id="msg" className="field" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="예: 주말 20% 할인, 신메뉴 출시" aria-invalid={tried && !message.trim()} aria-describedby="msg-err" />
         {tried && !message.trim() && <FieldError id="msg-err">하고 싶은 말을 적어 주세요.</FieldError>}
+        <RiskyWords text={message} />
 
         <button type="button" onClick={suggest} disabled={!ready || copyBusy} className="btn-line mt-3 w-full sm:w-auto">
           <Sparkles aria-hidden className="size-5" />
@@ -185,13 +200,23 @@ export function CreateForm({ purpose, purposeTitle }: { purpose: Purpose; purpos
       <div>
         <span className="label">상품 사진 (선택)</span>
         <p className="mb-3 hint">사진이 있으면 상품을 더 비슷하게 만들어요. PNG·JPG·WEBP, 10MB까지.</p>
-        {photo ? (
-          <div className="flex items-center gap-4 rounded-btn bg-mist p-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={photoUrl} alt="올린 상품 사진" className="size-20 rounded-sm object-cover" />
-            <span className="flex-1 truncate">{photo.name}</span>
-            <button type="button" onClick={removePhoto} className="btn-line min-h-[44px] px-4" aria-label="사진 빼기">
-              <X aria-hidden className="size-5" /> 빼기
+        {photo && cutout ? (
+          <CutoutEditor photoUrl={photoUrl} name={photo.name} scene={!detail} onDone={pickPhoto} onCancel={() => setCutout(false)} />
+        ) : photo ? (
+          <div className="flex flex-col gap-3 rounded-btn bg-mist p-3">
+            <div className="flex items-center gap-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={photoUrl} alt="올린 상품 사진" className="size-20 rounded-sm object-cover" />
+              <span className="flex-1 truncate">
+                {photo.name}
+                {keepProduct && <span className="block hint">상품 그대로, 배경은 AI가 그려요</span>}
+              </span>
+              <button type="button" onClick={removePhoto} className="btn-line min-h-[44px] px-4" aria-label="사진 빼기">
+                <X aria-hidden className="size-5" /> 빼기
+              </button>
+            </div>
+            <button type="button" onClick={() => setCutout(true)} className="btn-line min-h-[44px]">
+              <Scissors aria-hidden className="size-5" /> 배경 지우기
             </button>
           </div>
         ) : (

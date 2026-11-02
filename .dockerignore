@@ -1,0 +1,18 @@
+# docker build 때 VM에서 Docker로 보내는 파일(빌드 컨텍스트)을 줄인다.
+# Dockerfile은 pyproject.toml, uv.lock, README.md, src/만 쓴다.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+frontend
+docs
+tests
+outputs
+data
+model-cache
+.env
+.env.*
+!.env.example

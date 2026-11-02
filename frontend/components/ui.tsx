@@ -1,3 +1,4 @@
+import { riskyWords } from "@/lib/adCheck";
 import clsx from "clsx";
 import { AlertCircle, Loader2 } from "lucide-react";
 
@@ -36,5 +37,16 @@ export function FieldError({ id, children }: { id?: string; children: React.Reac
     <p id={id} className="mt-2 flex items-center gap-1.5 font-medium">
       <AlertCircle aria-hidden className="size-5 shrink-0" /> {children}
     </p>
+  );
+}
+
+/** 근거 없으면 광고법에 걸리기 쉬운 말이 있을 때만 보임. 막지는 않음 */
+export function RiskyWords({ text }: { text: string }) {
+  const words = riskyWords(text);
+  if (!words.length) return null;
+  return (
+    <FieldError>
+      {words.map((w) => `‘${w}’`).join(", ")} 같은 말은 근거가 없으면 광고법에 걸릴 수 있어요.
+    </FieldError>
   );
 }

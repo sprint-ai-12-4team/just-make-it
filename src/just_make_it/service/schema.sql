@@ -68,3 +68,21 @@ CREATE INDEX IF NOT EXISTS idx_generations_client
 -- [추가] 서버 시작 시 정리 쿼리가 빨리 찾도록 (processing인 행만 인덱스)
 CREATE INDEX IF NOT EXISTS idx_generations_processing
     ON generations (status) WHERE status = 'processing';
+
+-- [추가 S2] 같은 원본 계열 조회 (GET /generations/{id}/family)가 자식 결과를 빨리 찾도록
+CREATE INDEX IF NOT EXISTS idx_generations_parent
+    ON generations (parent_id) WHERE parent_id IS NOT NULL;
+
+-- [추가] 사용 기록 (api_spec_next 1): 다운로드·링크 복사·다시 만들기·글자 고치기·배경 지우기·문구 고르기
+-- 채택률(발표 지표)과 다음 학습용 선호 데이터. 같은 행동도 누를 때마다 1행
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY,
+    generation_id TEXT NOT NULL REFERENCES generations(id),
+    client_id     TEXT NOT NULL,
+    type          TEXT NOT NULL,                    -- download, copy_link, remake, edit_text, cutout, pick_copy (값 검사는 API)
+    detail_json   TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_generation
+    ON events (generation_id, type);

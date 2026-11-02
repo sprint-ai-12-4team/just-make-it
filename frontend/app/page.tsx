@@ -28,7 +28,7 @@ export default function Home() {
           <p className="mx-auto mb-4 flex w-fit items-center gap-1.5 rounded-full bg-white px-4 py-1.5 text-caption font-medium">
             <Sparkles aria-hidden className="size-4" /> 소상공인을 위한 AI 광고 스튜디오
           </p>
-          <p aria-hidden className="text-center text-[15vw] font-bold leading-none tracking-tight sm:text-[128px]">
+          <p aria-hidden className="text-center text-[15vw] font-bold leading-none tracking-[0.02em] sm:text-[128px]">
             Just Make It.
           </p>
           <ul className="mx-auto -mt-2 grid max-w-4xl grid-cols-2 gap-4 sm:-mt-10 sm:grid-cols-4" aria-label="만든 광고 예시">
@@ -122,7 +122,7 @@ export default function Home() {
         </section>
 
         <section className="bg-honey px-4 py-20 text-center">
-          <p aria-hidden className="text-[15vw] font-bold leading-none tracking-tight sm:text-[112px]">Just Make It.</p>
+          <p aria-hidden className="text-[15vw] font-bold leading-none tracking-[0.02em] sm:text-[112px]">Just Make It.</p>
           <p className="mt-4">고민은 짧게, 광고는 지금. 첫 광고를 만들어 보세요.</p>
           <Link href="#start" className="btn-fill mt-6">
             무료로 광고 만들기 <ArrowRight aria-hidden className="size-5" />

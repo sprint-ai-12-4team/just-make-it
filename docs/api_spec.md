@@ -16,7 +16,7 @@
 | 에러 | FastAPI 기본 형식 `{"detail": "사용자에게 보여줄 한글 메시지"}` |
 | 생성 경로 | 로컬 GPU / OpenAI 중 어디서 만들었는지는 `source`로만 알려줌. **화면에는 노출하지 않음** |
 | 모델 이름 | `image_model`·`text_model` 값은 화면에 노출하지 않음. 프론트는 "빠르게 / 더 정교하게" 같은 이름으로만 보여줌 |
-| 동기 / 비동기 | 단일 이미지(`/generate`)는 **동기**. 상세페이지(`/detail-pages`)는 **비동기** (`202` 응답 → 폴링) |
+| 동기 / 비동기 | 단일 이미지는 **동기**(`POST /generate`)와 **비동기**(`POST /generations`, `202` → `GET /generations/{id}` 폴링) 둘 다 됨 (V3, 10-28). 상세페이지(`/detail-pages`)는 **비동기** |
 
 ---
 
@@ -26,9 +26,14 @@
 |--------|------|------|------|
 | `GET` | `/health` | 서버 상태 확인 (docker healthcheck) | — |
 | `POST` | `/copies` | 홍보 문구 3개 추천 | ② 기본 정보 입력 |
-| `POST` | `/generate` | 광고 이미지 생성 (다시 만들기·수정 포함) | ④ 생성 요청 |
-| `GET` | `/generations/{id}` | 생성 결과 다시 조회 | ⑤ 결과 확인 |
+| `POST` | `/generate` | 광고 이미지 생성 (다시 만들기·수정 포함), 동기 | ④ 생성 요청 |
+| `POST` | `/generations` | 광고 이미지 생성, **비동기** (문구 먼저, 그림 나중) — V3 | ④ 생성 요청 |
+| `GET` | `/generations/{id}` | 생성 결과 다시 조회 (비동기 생성 폴링 포함) | ⑤ 결과 확인 |
+| `GET` | `/generations/{id}/family` | 같은 원본에서 다시 만든 결과 목록 — S2 | ⑤ 나란히 보기·되돌리기 |
 | `POST` | `/generations/{id}/text` | 글자(문구·위치·글꼴·크기)만 바꿔 다시 얹기 | ⑤ 결과 확인 |
+| `POST` | `/generations/{id}/image` | 브라우저에서 고친 그림(배경 지우기·글자)을 서버에 저장 — S7 | ⑤ 결과 확인 |
+| `POST` | `/events` | 다운로드·링크 복사·다시 만들기 등 사용 기록 — S4 | ⑤ 결과 확인 |
+| `GET` | `/stats` | 채택률 지표 (생성 · 다운로드 · 직접 고침 · 다시 만들기) — S4 | — (운영·발표) |
 | `POST` | `/detail-pages` | 상세페이지 생성 시작 (비동기) | ④ 생성 요청 (커머스) |
 | `GET` | `/detail-pages/{id}` | 상세페이지 진행 상황·결과 조회 (폴링) | ④ 대기 → ⑤ 결과 확인 |
 | `POST` | `/detail-pages/{id}/sections/{index}` | 섹션 1개만 다시 생성 | ⑤ 결과 확인 |
@@ -122,8 +127,27 @@
 | `text_layout` | 실제로 얹은 글자 위치·글꼴·크기 ([5. 공통 값](#text_layout--글자-위치글꼴크기)). 결과 화면의 "글자 고치기" 초기값 |
 | `source` | `local` (GPU) 또는 `openai`. 통계용, 화면 노출 금지 |
 
-> 단일 이미지는 **동기 응답**입니다 (보통 10~30초). 로컬 GPU가 바쁘면 서버가 OpenAI로 바로 넘기므로 폴링하지 않습니다.
+> `/generate`는 **동기 응답**입니다 (보통 10~30초). 기다리는 동안 문구·진행 상황을 보여주려면 같은 본문으로 [`POST /generations`](#post-generations--광고-이미지-생성-비동기-v3)를 씁니다.
 > 30초를 넘는 작업(상세페이지)은 [`POST /detail-pages`](#post-detail-pages--상세페이지-생성-시작)의 비동기 방식을 씁니다.
+
+### `POST /generations` — 광고 이미지 생성 (비동기, V3)
+
+`/generate`와 **요청 본문·검사·라우팅이 같고**, 기다리지 않고 바로 `202`를 돌려줍니다. 프론트는 문구를 먼저 보여주고 `GET /generations/{id}`를 **2초마다** 조회합니다 (`status`가 `processing`이 아니면 멈춤).
+
+**응답** `202`
+
+```json
+{"id": "6f1c2b0e-...", "status": "processing", "message": "신메뉴 출시", "width": 1024, "height": 1024, "estimated_seconds": 24.0}
+```
+
+| 필드 | 설명 |
+|------|------|
+| `message` | 입력한 문구. 이미지보다 먼저 화면에 보여줄 수 있음 (`텍스트 짧게`면 완료 후 조회 응답의 `message`로 바뀔 수 있음) |
+| `width`, `height` | 결과 이미지 크기. 자리(비율)를 미리 잡아둘 때 사용 |
+| `estimated_seconds` | 끝날 때까지 남은 예상 시간(초). 대략적인 값 |
+
+- 에러는 `/generate`와 같음 (`400`·`413`·`415`·`422`·`429`, 대기열이 가득 차면 `503`). 생성 자체의 실패는 조회 응답의 `status: "error"`로 알 수 있음
+- 동기 `/generate`와 달리 응답을 기다리다 작업을 취소하지 않음 → 화면을 닫았다 와도 같은 `id`로 결과를 볼 수 있음
 
 ### `GET /generations/{id}` — 결과 조회
 
@@ -151,6 +175,37 @@
 - `status`: `success` | `processing` | `error`
 - 없는 `id`면 `404`
 - 글자를 고쳤으면 고친 뒤의 `image_url`·`message`·`text_layout`이 옴 (링크 공유도 최신 상태)
+- `processing`이면 `progress`가 함께 옴 (V3). 그 밖에는 `null`
+
+  ```json
+  "progress": {"stage": "queued", "jobs_ahead": 2, "estimated_seconds": 60.0}
+  ```
+
+  | 필드 | 값 |
+  |------|----|
+  | `stage` | `queued` (차례 기다리는 중) · `running` (만드는 중) |
+  | `jobs_ahead` | 먼저 처리될 작업 수. 화면 예: "앞에 2건 기다리는 중" |
+  | `estimated_seconds` | 남은 예상 시간(초). 화면 예: "약 1분" |
+
+  서버를 다시 켜기 전에 접수한 작업처럼 진행 상황을 모르면 `null`
+
+### `GET /generations/{id}/family` — 같은 원본에서 만든 결과 (S2)
+
+결과 화면 "나란히 보기 · 되돌리기". `parent_id`를 거슬러 맨 처음 결과를 찾고, 그 아래 모든 결과를 돌려줍니다 (만든 순서). 프론트 `lib/family.ts`(브라우저 기록)를 대체하면 다른 기기·공유 링크에서도 같은 목록이 보입니다.
+
+**응답** `200`
+
+```json
+{
+  "items": [
+    {"id": "a1...", "parent_id": null, "image_url": "https://.../a1.png", "created_at": "2026-10-26T09:30:00.000Z"},
+    {"id": "b2...", "parent_id": "a1...", "image_url": "https://.../b2.png", "created_at": "2026-10-26T09:31:10.000Z"}
+  ]
+}
+```
+
+- 성공한 결과만, 최대 50개. 상세페이지 섹션은 제외
+- 없는 `id`(상세페이지 섹션 `id` 포함) `404`. 혼자인 결과도 `items`에 자기 1개가 옴
 
 ### `POST /generations/{id}/text` — 글자만 다시 얹기
 
@@ -174,6 +229,82 @@
 - 없는 `id`면 `404`, 아직 `processing`이거나 `error`인 결과면 `409`
 - 분위기(`style`)별 색·테두리·장식은 그대로 두고 글꼴만 바꿈
 - 문구에 글꼴에 없는 글자가 있으면 서버가 `dodum`으로 대신 씀 → 응답 `text_layout.font`가 실제 값
+
+### `POST /generations/{id}/image` — 고친 그림 저장 (S7)
+
+배경 지우기·글자 직접 고치기 결과는 그 브라우저에만 있어서, 링크를 받은 사람은 서버가 처음 만든 그림을 봅니다. 고친 그림을 올려 링크에도 반영합니다. 이미지는 다시 만들지 않고 일일 생성 한도에 세지 않음.
+
+**요청** `multipart/form-data`
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|:----:|------|
+| `image` | file | ✅ | 글자까지 얹은 최종 그림. PNG, 10MB 이하 |
+| `background` | file | | 글자 없는 그림 (배경을 지웠을 때). 보내면 `background_url`도 바뀌어, 이후 `POST /generations/{id}/text`가 지운 배경 위에 글자를 얹음 |
+| `message` | string | | 그림에 얹은 문구. 보내면 응답 `message`가 바뀌어 다시 고치기·다시 만들기가 이어 씀 |
+
+**응답** `200` — `GET /generations/{id}`와 같은 형식. `image_url`이 **새 주소** (`/text`와 같은 방식, 캐시 회피). `edited: true` (`GET /generations/{id}`에도 있음, 기본 `false`)
+
+- 크기는 원래 결과와 같아야 함 (`width`×`height`, `image`·`background` 모두). 다르면 `400`
+- 없는 `id` `404`, `processing`·`error`인 결과 `409`, 10MB 초과 `413`, PNG가 아니면 `415`, `image`가 없으면 `422`
+- `text_layout`은 그대로 둠 (서버 글자 고치기의 처음 값)
+- ponytail: 지금은 아무나 링크만 알면 덮어쓸 수 있음 (`/text`와 같음). 로그인(S3) 때 `client_id` 확인 추가
+
+### `POST /events` — 사용 기록 (S4)
+
+채택률(발표 지표)과 다음 학습용 선호 데이터를 쌓습니다. 실패해도 화면에는 영향 없음 (프론트는 실패를 무시).
+
+**요청** JSON
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|:----:|------|
+| `generation_id` | string | ✅ | 결과 `id` |
+| `type` | string | ✅ | 아래 표 |
+| `detail` | object | | 추가 정보 (자유 형식, 4KB 이하) |
+
+| `type` | 언제 | `detail` 예 |
+|--------|------|-------------|
+| `download` | "내 기기에 저장" | `{"edited": true}` (직접 고친 그림이면) |
+| `copy_link` | "링크 복사" | |
+| `remake` | "다시 만들기" | `{"adjustments": ["더 밝게"]}` |
+| `edit_text` | 글자 직접 고치기 시작 | |
+| `cutout` | 배경 지우고 색 채우기 완료 | |
+| `pick_copy` | 추천 문구 중 하나를 고름 | `{"index": 1, "copy": "…"}` |
+
+```json
+{"generation_id": "6f1c2b0e-...", "type": "download", "detail": {"edited": false}}
+```
+
+**응답** `204` (본문 없음)
+
+- 모르는 `type`, 없는 `generation_id`, `detail`이 객체가 아니거나 4KB 초과 → `400`
+- 누를 때마다 1건씩 쌓임. 사용자는 `X-Client-Id`로 남김
+- `download`·`copy_link`이면 `generations.downloaded_at`(첫 시각)도 함께 채움
+- 일일 생성 한도에 세지 않음
+
+### `GET /stats` — 채택률 지표 (S4, 서빙 추가)
+
+발표·운영용 집계. 단일 이미지 결과만 (상세페이지 섹션 제외).
+
+| 쿼리 | 기본값 | 설명 |
+|------|--------|------|
+| `days` | `7` | 최근 며칠(한국 날짜, 오늘 포함). 1~90 |
+
+**응답** `200`
+
+```json
+{
+  "days": [{"date": "2026-10-28", "generated": 40, "downloaded": 22, "edited": 12, "remade": 15, "download_rate": 0.55, "edit_rate": 0.3, "remake_rate": 0.375}],
+  "total": {"date": "total", "generated": 40, "downloaded": 22, "edited": 12, "remade": 15, "download_rate": 0.55, "edit_rate": 0.3, "remake_rate": 0.375}
+}
+```
+
+| 필드 | 뜻 |
+|------|----|
+| `generated` | 성공한 결과 수 |
+| `downloaded` | 그중 다운로드 또는 링크 복사된 결과 수 |
+| `edited` | 그중 글자 직접 고치기·배경 지우기(`edit_text`·`cutout`)를 했거나 고친 그림을 저장한 결과 수 |
+| `remade` | 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (`parent_id` 기준) |
+| `*_rate` | `generated` 대비 비율 |
 
 ### `POST /detail-pages` — 상세페이지 생성 시작
 
@@ -285,7 +416,7 @@
 - **이미지 모델은 글자 없는 이미지만 만듦** ("no text, no letters"). 문구는 서버(core `text_overlay.py`, PIL)가 분위기별 디자인으로 얹음
 - 응답에 최종 이미지(`image_url`) + 글자 없는 원본(`background_url`) + 문구(`message`) + 위치·글꼴·크기(`text_layout`)를 모두 줌
 - 결과 화면은 기본으로 `image_url`을 그대로 씀. 사용자가 **"글자 직접 고치기"**를 누르면 프론트가 `background_url` 위에 `<canvas>`로 문구를 얹고 끌어서 옮김 (스타일 10종 `frontend/lib/textStyles.ts`, 1~5번은 core `DESIGNS`와 같은 계열, 글꼴은 `frontend/public/fonts`) — 10-22 PM 결정
-- 직접 고친 결과는 다운로드로만 남음 (서버 저장 없음 → 링크 공유는 서버 이미지). `POST /generations/{id}/text`는 서버 재렌더용으로 유지, 프론트는 현재 안 씀
+- 직접 고친 결과는 `POST /generations/{id}/image`로 서버에 저장하면 링크 공유에도 반영됨 (S7, 10-26). `POST /generations/{id}/text`는 서버 재렌더용으로 유지, 프론트는 현재 안 씀
 - 이유: 글자 디자인(테두리·그림자·장식·기울기)을 서버 한 곳에서만 그림 → 미리보기 = 다운로드 = 공유 이미지. 프론트 canvas와 결과가 어긋나지 않음
 - `generation_mode`는 계속 **삭제** 상태 (항상 글자를 얹음). `글자 더 크게` 칩은 `size_scale: 1.25`로 대체
 - 상세페이지 섹션은 아직 프론트 canvas로 얹음 (단일 이미지 먼저 적용)
@@ -324,4 +455,10 @@
 - [ ] 참고 사진 최대 크기 10MB 확정 — 서빙·모델
 - [ ] 프리미엄(OpenAI 강제) 요청 필드 필요 여부 — PM·서비스
 - [ ] 글자 자유 위치(드래그) — 지금은 위·가운데·아래 3곳. 필요하면 `text_layout`에 `x`·`y`(0~1 비율) 추가 — PM·모델
-- [ ] 다시 만들기 때 원본 참고 사진: 조회 응답에 사진이 없어 프론트가 다시 못 보냄 → 서버가 `parent_id`의 `reference_image_path`를 재사용 — 서빙
+- [x] 다시 만들기 때 원본 참고 사진: 조회 응답에 사진이 없어 프론트가 다시 못 보냄 → 서버가 `parent_id`의 참고 사진을 재사용 — 서빙
+- [x] 사용 기록·고친 그림 저장·같은 원본 목록 → PM·서비스 추가 명세(api_spec_next, 10-28) 그대로 반영. 서비스 함수 `db.add_event`·`db.replace_image`·`db.family` + 서빙 라우트
+- [ ] 같은 원본 목록(`/family`)은 결과 `id`만 알면 누구나 볼 수 있음 (공유 링크를 받은 사람도 이전 시안을 봄). 로그인(S3) 때 `client_id`로 제한 — PM
+- [ ] `/stats`는 인증 없이 열려 있음 (합계 숫자만 나옴). 외부에 숨기려면 관리자 키 추가 — PM·서빙
+- [ ] 프론트 전환: 비동기 생성(`POST /generations` + 폴링, 선택), 나란히 보기(`/family`), 사용 기록(`/events`), 고친 그림 저장(`/image`) 호출 — 서비스
+- [ ] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 모델·서빙 준비 후
+- [x] 단일 이미지는 요청당 1장 (여러 장 후보 생성 없음, V4 보류). 비교는 "한 번 더 만들기" + 같은 원본 목록으로 — PM 10-28

@@ -7,19 +7,23 @@
    이미지는 글자 없이 만든다 (문구는 프론트가 얹음)
 4. 칸이 모두 끝나면 service/db.py가 페이지를 success로 닫는다. 프론트는 2초마다 폴링
 
-섹션 문구 생성기(`DetailWriter`)는 core에 상세페이지용 함수가 생기면 그걸 부르도록
-`CoreDetailWriter`만 바꾸면 된다. 지금은 core의 `generate_text()`에 규칙을 넘겨 만든다.
+섹션 문구는 core의 `suggest_detail_sections()`가 만든다 (`CoreDetailWriter`).
+테스트·mock 모드에서는 `MockDetailWriter`로 바꿔 끼운다.
 """
 
 import asyncio
 import logging
-import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .generators import GeneratorError
-from .queue_manager import DailyLimitError, QueueFullError, QueueManager
+from .queue_manager import (
+    DailyLimitError,
+    QueueFullError,
+    QueueManager,
+    run_with_deadline,
+)
 from .records import GenerationRecords
 from .schemas import IMAGE_QUALITY, TEXT_QUALITY, DetailPageRequest, GenerationSpec
 from .settings import ServingSettings
@@ -63,106 +67,26 @@ class DetailWriter(ABC):
         """
 
 
-DETAIL_RULES = """\
-너는 스마트스토어 상세페이지를 쓰는 카피라이터야.
-상세페이지는 위에서 아래로 5칸이고, 칸마다 사진 위에 제목과 설명을 얹어.
-칸 구성
-1. 대표: 핵심 메시지를 살려 상품을 한눈에 소개
-2~4. 좋은 점: 상품 특징을 한 칸에 하나씩
-5. 마무리: 구매를 권하는 따뜻한 한마디
-규칙
-- 제목은 15자 안팎, 설명은 30자 안팎으로 짧고 읽기 쉽게
-- 최고, 1위 같은 근거 없는 과장 표현과 의학적 효능 표현은 쓰지 않기
-- 입력된 할인율, 가격, 날짜, 수치는 바꾸지 말고 그대로 쓰기
-- 특징이 주어지면 2~4칸 제목에 그 특징을 순서대로 그대로 쓰기
-- 특징이 모자라면 상품과 메시지에서 자연스럽게 떠올릴 수 있는 장점으로 채우되,
-  확인할 수 없는 수치나 인증은 지어내지 않기
-- 장면은 그 칸 사진에 담을 모습을 한 문장으로. 칸마다 다른 장면으로 쓰고,
-  글자·간판·로고·포장 문구는 넣지 않기
-- 한 칸에 한 줄씩 `번호 | 제목 | 설명 | 장면` 형식으로 5줄만 출력하고 다른 말은 붙이지 않기
-
-예시
-- 상품: 수제 딸기잼 / 메시지: 국산 딸기 100% 신상품 / 특징: 무첨가, 소량 생산, 선물 포장
-1 | 국산 딸기 100%, 그대로 담았어요 | 설탕 말고 딸기 맛만 남겼습니다 | 유리병에 담긴 붉은 딸기잼과 생딸기
-2 | 무첨가 | 보존료·색소 없이 만들어요 | 나무 숟가락으로 떠낸 윤기 나는 잼
-3 | 소량 생산 | 매일 필요한 만큼만 끓여요 | 작은 냄비에서 보글보글 끓는 딸기
-4 | 선물 포장 | 리본 하나로 마음까지 전해요 | 리본으로 묶은 잼 병 두 개
-5 | 아침 식탁에 딸기 한 스푼 | 오늘 주문하면 내일 만나요 | 잼을 바른 토스트와 커피가 놓인 아침 식탁"""
-
-_LINE = re.compile(r"^\s*[-*]?\s*(\d)\s*[.)]?\s*\|(.+)$")
-
-
-def build_detail_input(
-    product_name: str, message: str, features: list[str], style: str | None
-) -> str:
-    text = f"상품: {product_name} / 메시지: {message}"
-    if features:
-        text += f" / 특징: {', '.join(features)}"
-    if style:
-        text += f" / 분위기: {style}"
-    return text + "\n상세페이지 5칸을 써줘."
-
-
-def parse_sections(text: str, features: list[str]) -> list[dict]:
-    """모델 출력을 5칸으로 나눈다. 칸이 모자라거나 형식이 깨지면 ValueError.
-
-    특징을 직접 적었으면 2~4칸 제목은 그 특징으로 고정한다 (모델이 바꿔 써도).
-    """
-    found: dict[int, dict] = {}
-    for line in text.splitlines():
-        match = _LINE.match(line.strip("`"))
-        if not match:
-            continue
-        number = int(match.group(1))
-        parts = [p.strip().strip("\"'") for p in match.group(2).split("|")]
-        if not 1 <= number <= SECTION_COUNT or len(parts) < 2 or not parts[0]:
-            continue
-        found.setdefault(
-            number - 1,
-            {
-                "title": parts[0],
-                "body": parts[1] if len(parts) > 1 else "",
-                "image_prompt": parts[2] if len(parts) > 2 and parts[2] else parts[0],
-            },
-        )
-    if len(found) < SECTION_COUNT:
-        raise ValueError(f"상세페이지 문구가 {len(found)}칸뿐입니다: {text[:200]!r}")
-
-    sections = []
-    for i in range(SECTION_COUNT):
-        section = {"role": ROLES[i], **found[i]}
-        if 1 <= i <= len(features):
-            section["title"] = features[i - 1]
-        sections.append(section)
-    return sections
-
-
 class CoreDetailWriter(DetailWriter):
-    """core의 텍스트 모델(Gemma·luna)로 5칸 문구를 만든다. 형식이 깨지면 한 번 더 시도."""
-
-    attempts = 2
-    max_tokens = 900
+    """core의 상세페이지 5칸 문구 함수(`suggest_detail_sections`)를 부른다."""
 
     def write(self, product_name, message, features, style, text_quality="basic"):
-        from just_make_it.core import TextGenerationError
-        from just_make_it.core.copywriter import generate_text
+        from just_make_it.core import TextGenerationError, suggest_detail_sections
 
-        user_input = build_detail_input(product_name, message, features, style)
-        last_error = ""
-        for _ in range(self.attempts):
-            try:
-                result, _reason = generate_text(
-                    DETAIL_RULES, user_input, text_quality, max_tokens=self.max_tokens
-                )
-                return parse_sections(result.text, features)
-            except ValueError as exc:  # 형식 오류 → 다시 시도
-                last_error = str(exc)
-                logger.warning("상세페이지 문구 형식 오류: %s", exc)
-            except TextGenerationError as exc:
-                raise GeneratorError(str(exc)) from exc
-            except Exception as exc:  # API 키 누락 등
-                raise GeneratorError(f"{type(exc).__name__}: {exc}") from exc
-        raise GeneratorError(last_error)
+        try:
+            return suggest_detail_sections(
+                product_name,
+                message,
+                features=features,
+                style=style,
+                text_quality=text_quality,
+            )
+        except ValueError as exc:  # 입력 오류 (라우터가 먼저 막지만 방어)
+            raise GeneratorError(str(exc), retryable=False) from exc
+        except TextGenerationError as exc:
+            raise GeneratorError(str(exc)) from exc
+        except Exception as exc:  # API 키 누락 등
+            raise GeneratorError(f"{type(exc).__name__}: {exc}") from exc
 
 
 class MockDetailWriter(DetailWriter):
@@ -227,7 +151,7 @@ class DetailPageService:
             DetailPageBusyError: 이 사용자의 페이지가 이미 진행 중
             DailyLimitError: 오늘 5칸을 더 만들 수 없음
         """
-        text_quality = (
+        text_quality = self.manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
             else self.settings.generate_text_quality
@@ -275,15 +199,14 @@ class DetailPageService:
     ) -> None:
         started = time.monotonic()
         try:
-            sections = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.writer.write,
-                    payload.product_name,
-                    payload.message,
-                    payload.features,
-                    payload.style,
-                    page.text_quality,
-                ),
+            # 시간이 지나면 core의 Gemma·luna 호출도 멈춘다 (core/deadline.py)
+            sections = await run_with_deadline(
+                self.writer.write,
+                payload.product_name,
+                payload.message,
+                payload.features,
+                payload.style,
+                page.text_quality,
                 timeout=self.settings.detail_text_timeout_seconds,
             )
         except TimeoutError:
@@ -389,8 +312,8 @@ class DetailPageService:
                 product_name=stored["product_name"],
                 style=stored.get("style"),
                 image_model=stored.get("image_model", "flux2-klein-4b"),
-                text_quality=stored.get(
-                    "text_quality", self.settings.generate_text_quality
+                text_quality=self.manager.text_quality(
+                    stored.get("text_quality", self.settings.generate_text_quality)
                 ),
             )
             await self.manager.check_capacity(page_input.client_id, 1)

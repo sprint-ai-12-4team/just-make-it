@@ -16,6 +16,7 @@ weights/
 
 # 개인 Docs
 docs/private/
+docs/proposals/
 
 # VS Code
 .vscode/

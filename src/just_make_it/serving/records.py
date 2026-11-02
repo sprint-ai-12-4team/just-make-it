@@ -79,7 +79,11 @@ class GenerationRecords:
         queue_ms: int | None,
         image_ms: int | None,
     ) -> dict:
-        """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양."""
+        """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양.
+
+        시간은 따로 기록한다: queue_ms 대기, output.text_ms 문구, image_ms 그림 모델.
+        생성기 호출 전체 시간은 params의 run_ms.
+        """
         return db.finish_generation(
             gid,
             output.image_bytes,
@@ -105,7 +109,7 @@ class GenerationRecords:
         return db.background(gid)
 
     def update_text(
-        self, gid: str, image: bytes, *, message: str, text_layout: dict
+        self, gid: str, image: bytes, *, message: str, text_layout: dict | None
     ) -> dict:
         """글자 고치기 결과 저장. 반환값은 조회 응답 모양 (image_url이 새 주소)."""
         return db.update_text(gid, image, message=message, text_layout=text_layout)
@@ -118,6 +122,17 @@ class GenerationRecords:
 
     def count_today(self, client_id: str) -> int:
         return db.count_today(client_id)
+
+    def cost_today(self) -> float:
+        """오늘(한국 시간) 생성 기록의 cost_usd 합계. 서버를 다시 켜도 금액 상한이 이어지게."""
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("""SELECT COALESCE(SUM(cost_usd), 0) FROM generations
+                   WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                         '+9 hours', 'start of day', '-9 hours')""").fetchone()
+        finally:
+            conn.close()
+        return float(row[0] or 0)
 
     def seed_of(self, gid: str) -> int | None:
         """결과를 만들 때 쓴 시드 (조금 수정하기에서 구도 유지용). 없으면 None.
@@ -132,6 +147,65 @@ class GenerationRecords:
         finally:
             conn.close()
         return row[0] if row else None
+
+    def _read(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
+        """읽기 전용 연결로 조회 (service/db.py에 없는 조회용)."""
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(sql, args).fetchall()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ 같은 원본·고친 그림·사용 기록
+    def family(self, gid: str, limit: int = 50) -> list[dict] | None:
+        """같은 원본에서 만든 성공 결과 (만든 순서). 없는 id·상세페이지 섹션이면 None."""
+        return db.family(gid, limit)
+
+    def replace_image(
+        self,
+        gid: str,
+        image: bytes,
+        *,
+        background: bytes | None = None,
+        message: str | None = None,
+    ) -> dict:
+        """브라우저에서 고친 그림 저장. 반환값은 조회 응답 모양 (image_url 새 주소, edited=True)."""
+        return db.replace_image(gid, image, background=background, message=message)
+
+    def add_event(
+        self, gid: str, client_id: str, event_type: str, detail: dict | None
+    ) -> None:
+        """사용 기록 1건. 모르는 type·없는 결과 id·4KB 넘는 detail이면 ValueError."""
+        db.add_event(client_id, gid, event_type, detail)
+
+    def adoption_stats(self, days: int) -> list[dict]:
+        """최근 days일(한국 날짜) 단일 이미지 결과의 사용 지표. 날짜 오름차순.
+
+        - generated: 성공한 결과 수 (상세페이지 칸 제외)
+        - downloaded: 그중 다운로드 또는 링크 복사된 결과 수
+        - edited: 그중 글자 직접 고치기·배경 지우기를 했거나 고친 그림을 저장한 결과 수
+        - remade: 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (parent_id 기준)
+        """
+        rows = self._read(
+            """SELECT date(g.created_at, '+9 hours') AS day,
+                      COUNT(*) AS generated,
+                      SUM(EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                                 AND e.type IN ('download', 'copy_link'))) AS downloaded,
+                      SUM(EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                                 AND e.type IN ('edit_text', 'cutout'))
+                          OR COALESCE(json_extract(g.params_json, '$.edited'), 0))
+                          AS edited,
+                      SUM(EXISTS(SELECT 1 FROM generations c
+                                 WHERE c.parent_id = g.id)) AS remade
+                 FROM generations g
+                WHERE g.status = 'success' AND g.detail_page_id IS NULL
+                  AND g.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                        '+9 hours', 'start of day', ?, '-9 hours')
+                GROUP BY day ORDER BY day""",
+            (f"-{max(0, days - 1)} days",),
+        )
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------ 상세페이지
     def start_detail_page(self, client_id: str, input: dict) -> str:
