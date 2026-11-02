@@ -22,6 +22,17 @@ dependencies = [
 [project.scripts]
 just-make-it = "just_make_it:main"
 
+[project.optional-dependencies]
+gpu = [
+    "accelerate>=1.15.0",
+    "bitsandbytes>=0.50.2",
+    "diffusers>=0.42",
+    "huggingface-hub>=2.4.0",
+    "safetensors>=0.8.0",
+    "torch>=2.15.0",
+    "transformers>=5.22.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
