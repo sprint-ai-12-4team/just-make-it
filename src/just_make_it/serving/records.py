@@ -61,6 +61,7 @@ class GenerationRecords:
                 "message": spec.message,
                 "style": spec.style,
                 "adjustments": spec.adjustments,
+                **({"consult_id": spec.consult_id} if spec.consult_id else {}),
             },
             backend=backend,
             model=model,
@@ -132,7 +133,12 @@ class GenerationRecords:
                          '+9 hours', 'start of day', '-9 hours')""").fetchone()
         finally:
             conn.close()
-        return float(row[0] or 0)
+        # 상담·문구 변환에 쓴 금액도 같은 하루 상한에 들어감
+        return float(row[0] or 0) + db.text_cost_today()
+
+    def text_cost_today(self) -> float:
+        """오늘 상담·문구 변환에 쓴 OpenAI 금액 (텍스트 몫 상한용)."""
+        return db.text_cost_today()
 
     def seed_of(self, gid: str) -> int | None:
         """결과를 만들 때 쓴 시드 (조금 수정하기에서 구도 유지용). 없으면 None.
@@ -206,6 +212,37 @@ class GenerationRecords:
             (f"-{max(0, days - 1)} days",),
         )
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ 상담·텍스트 호출
+    def start_consult(
+        self, client_id: str, ip: str | None, start: dict, first_message: dict
+    ) -> str:
+        return db.start_consult(client_id, ip, start, first_message)
+
+    def get_consult(self, cid: str) -> dict | None:
+        return db.get_consult(cid)
+
+    def save_consult(self, consult: dict) -> None:
+        db.save_consult(consult)
+
+    def add_text_call(
+        self,
+        kind: str,
+        client_id: str,
+        ip: str | None,
+        *,
+        model: str | None = None,
+        source: str | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
+        db.add_text_call(
+            kind, client_id, ip, model=model, source=source, cost_usd=cost_usd
+        )
+
+    def count_text_calls(
+        self, kind: str, *, client_id: str | None = None, ip: str | None = None
+    ) -> int:
+        return db.count_text_calls(kind, client_id=client_id, ip=ip)
 
     # ------------------------------------------------------------------ 상세페이지
     def start_detail_page(self, client_id: str, input: dict) -> str:

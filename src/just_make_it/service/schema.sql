@@ -86,3 +86,37 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_generation
     ON events (generation_id, type);
+
+-- [추가] AI 광고 상담 (api_spec_consult 3장). 대화 기록·칸·기획서를 한 행에 (상담 1번은 많아야 12턴)
+CREATE TABLE IF NOT EXISTS consults (
+    id            TEXT PRIMARY KEY,                 -- uuid4
+    client_id     TEXT NOT NULL,                    -- 만든 사람만 다시 열 수 있음
+    ip            TEXT,                             -- IP당 하루 상담 수 제한용
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    start_json    TEXT NOT NULL CHECK (json_valid(start_json)),     -- 시작할 때 받은 purpose, product_name
+    answers_json  TEXT NOT NULL CHECK (json_valid(answers_json)),   -- 칸별 답 {category, goal, ...}
+    messages_json TEXT NOT NULL CHECK (json_valid(messages_json)),  -- [{role, text, chips?}]
+    brief_json    TEXT CHECK (brief_json IS NULL OR json_valid(brief_json)),
+    turn          INTEGER NOT NULL DEFAULT 1,       -- 서버가 답한 횟수
+    off_topic     INTEGER NOT NULL DEFAULT 0,       -- 연속 주제 밖 횟수 (3이면 종료)
+    edits_left    INTEGER,                          -- 기획서를 더 고칠 수 있는 횟수
+    ended         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_consults_client
+    ON consults (client_id, created_at DESC);
+
+-- [추가] 텍스트 모델 호출 기록 (상담·문구 변환). 하루 횟수 제한과 OpenAI 금액(재시작해도 이어지게)
+CREATE TABLE IF NOT EXISTS text_calls (
+    id            INTEGER PRIMARY KEY,
+    kind          TEXT NOT NULL,                    -- consult_start, consult_turn, convert
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    model         TEXT,
+    source        TEXT,                             -- openai, local, none(모델 안 부름)
+    cost_usd      REAL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_text_calls_day
+    ON text_calls (kind, created_at);

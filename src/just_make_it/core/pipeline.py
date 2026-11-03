@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from PIL import Image
 
 from just_make_it import config
-from just_make_it.core import ai_models
+from just_make_it.core import ai_models, deadline
 from just_make_it.core.base import ImageGenerationError
 from just_make_it.core.copywriter import (
     check_text_quality,
@@ -154,6 +154,7 @@ def generate_ad_image(
     text_cost = 0.0
     text_model = ""
     text_reason = ""
+    deadline.report("text")  # 서빙 진행 막대용 (Deadline이 없으면 아무것도 안 함)
     if SHORTEN_ADJUSTMENT in adjustments:
         message, shorten_result, text_reason = shorten_message(message, text_quality)
         text_cost += shorten_result.cost_usd
@@ -206,6 +207,7 @@ def generate_ad_image(
         adjustments=adjustments,
     )
     start = time.perf_counter()
+    deadline.report("image")
     result, image_reason = _generate_image(
         product_name, prompt, width, height, reference_png, seed, image_quality
     )

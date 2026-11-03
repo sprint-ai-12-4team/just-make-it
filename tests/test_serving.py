@@ -25,6 +25,7 @@ from just_make_it.core.base import (
     TextGenerationError,
     TextResult,
 )
+from just_make_it.serving.assistant import MockTextModels
 from just_make_it.serving.copywriter import CopyInputError, CopyWriter
 from just_make_it.serving.detail_pages import MockDetailWriter
 from just_make_it.serving.generators import (
@@ -174,6 +175,7 @@ def make_client(
     premium=None,
     copywriter=None,
     detail_writer=None,
+    text_models=None,
     **overrides,
 ):
     settings = ServingSettings(
@@ -191,6 +193,7 @@ def make_client(
         generators=(primary, fallback, premium),
         copywriter=copywriter or FakeCopyWriter(),
         detail_writer=detail_writer or MockDetailWriter(),
+        text_models=text_models or MockTextModels(),
     )
     return TestClient(app)
 

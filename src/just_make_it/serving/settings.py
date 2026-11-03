@@ -53,6 +53,20 @@ class ServingSettings(BaseSettings):
     # OpenAI로 넘기지 않고 로컬 대기열에서 기다린다. 크레딧 $30 보호용 (0이면 끔)
     openai_daily_budget_usd: float = 3.0
 
+    # ----- AI 상담·문구 변환 (api_spec_consult 3·4장, 0이면 무제한) -----
+    consult_daily_limit: int = 3  # client당 하루 상담 시작 수
+    consult_ip_daily_limit: int = 10  # IP당 하루 상담 시작 수
+    # 상담 1회 최대 턴: 질문 7 + 기획서 수정 2 + 주제 밖 되돌림 여유
+    consult_max_turns: int = 12
+    convert_daily_limit: int = 20  # client당 하루 문구 변환 수
+    # 하루 OpenAI 상한 중 상담·변환(텍스트)에 쓸 수 있는 비율. 넘으면 로컬 Gemma로
+    consult_budget_share: float = 0.33
+    # 상담·변환 한 번의 제한 시간(초)
+    text_task_timeout_seconds: float = 60.0
+    # IP 한도에 X-Forwarded-For 첫 값을 씀 (Vercel 프록시 뒤라 서버에는 프록시 IP만 보임).
+    # VM 주소로 직접 부르는 요청은 값을 꾸밀 수 있으니, 직접 공개하면 false
+    trust_forwarded_for: bool = True
+
     # ----- 타임아웃 -----
     # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리
     # (Flare 평균 17~20초, "텍스트 짧게"는 문구 모델 호출까지 포함)

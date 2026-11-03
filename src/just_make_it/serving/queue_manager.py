@@ -134,7 +134,12 @@ class Job:
     text_ms: int | None = None
     image_ms: int | None = None
     # 지금 돌고 있는 core 호출의 Deadline. cancel()이 취소 신호를 보낸다
+    # (core가 진행 상황 phase·step도 여기에 남김 → progress())
     deadline: Deadline | None = None
+    # 지금 생성기 호출을 시작한 시각 (재시도·장애 Fallback이면 다시 잼). 남은 시간 추정용
+    call_started_mono: float | None = None
+    # 생성기가 끝나고 결과를 저장하는 중이면 "saving"
+    phase: str | None = None
     cancelled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -218,6 +223,45 @@ class _DailyBudget:
             self._day, self._spent = today, 0.0
 
 
+def _speed_key(job: "Job") -> tuple[str, str, bool]:
+    """진행 막대 평균을 나누는 기준: (경로 종류, 이미지 크기, 참고 사진 여부)."""
+    from just_make_it.core.prompt_builder import get_image_size
+
+    try:
+        width, height = get_image_size(job.spec.purpose)
+        size = f"{width}x{height}"
+    except Exception:  # 모르는 목적이면 크기 구분 없이
+        size = "?"
+    kind = "primary" if job.route == "primary" else "extra"
+    return kind, size, job.spec.reference_image is not None
+
+
+class _Speeds:
+    """경로·크기·참고 사진 여부별 1건 시간(이동 평균). 진행 막대의 남은 시간 추정에만 쓴다.
+
+    서버를 켠 뒤 경로 종류마다 첫 호출(모델 워밍업)은 평균에 넣지 않는다.
+    같은 기준의 기록이 없으면 같은 경로 종류의 평균, 그것도 없으면 초기값을 쓴다.
+    """
+
+    def __init__(self, init: float) -> None:
+        self.init = init
+        self._avg: dict[tuple[str, str, bool], float] = {}
+        self._warmed: set[str] = set()
+
+    def get(self, key: tuple[str, str, bool]) -> float:
+        if key in self._avg:
+            return self._avg[key]
+        same_kind = [v for k, v in self._avg.items() if k[0] == key[0]]
+        return sum(same_kind) / len(same_kind) if same_kind else self.init
+
+    def add(self, key: tuple[str, str, bool], seconds: float) -> None:
+        if key[0] not in self._warmed:
+            self._warmed.add(key[0])
+            return
+        old = self._avg.get(key)
+        self._avg[key] = seconds if old is None else 0.7 * old + 0.3 * seconds
+
+
 class QueueManager:
     """작업 접수, 경로 선택, 실행, 상태 조회를 담당한다."""
 
@@ -237,12 +281,18 @@ class QueueManager:
 
         self.concurrency = max(1, settings.primary_concurrency)
         self.seconds_per_job = settings.seconds_per_job_init
-        # Fallback·프리미엄(OpenAI) 1건 시간. 진행 상황의 남은 시간 추정에만 쓴다
+        # Fallback·프리미엄(OpenAI) 1건 시간 (예전 값, /health 등과의 호환용)
         self.extra_seconds_per_job = settings.seconds_per_job_init
+        # 진행 막대용: 경로·크기·참고 사진 여부별 평균 (워밍업 제외)
+        self.speeds = _Speeds(settings.seconds_per_job_init)
         self.jobs_today = _DailyCounter(settings.daily_job_limit)
         self.extra_today = _DailyCounter(settings.extra_daily_limit)
         # OpenAI 금액 회로차단기 (V2). 열리면 Fallback·프리미엄·core 내부 폴백을 막는다
         self.budget = _DailyBudget(settings.openai_daily_budget_usd)
+        # 그중 상담·문구 변환(텍스트)에 쓸 수 있는 몫. 넘으면 텍스트만 로컬 Gemma로
+        self.text_budget = _DailyBudget(
+            settings.openai_daily_budget_usd * settings.consult_budget_share
+        )
         self._core_fallback_default: bool | None = None
 
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
@@ -259,6 +309,7 @@ class QueueManager:
         # 오늘 쓴 OpenAI 금액을 DB에서 이어받는다 (재시작해도 상한이 풀리지 않게)
         try:
             self.budget.set(await asyncio.to_thread(self.records.cost_today))
+            self.text_budget.set(await asyncio.to_thread(self.records.text_cost_today))
         except Exception:
             logger.exception("오늘 OpenAI 금액을 읽지 못함 (0으로 시작)")
         self._sync_core_fallback()
@@ -426,6 +477,17 @@ class QueueManager:
         """OpenAI를 써도 되는지 (금액 회로가 닫혀 있는지)."""
         return not self.budget.exceeded
 
+    @property
+    def text_api_allowed(self) -> bool:
+        """상담·문구 변환에 OpenAI를 써도 되는지 (전체 상한 + 텍스트 몫이 남았는지)."""
+        return self.api_allowed and not self.text_budget.exceeded
+
+    def add_text_cost(self, usd: float | None) -> None:
+        """상담·문구 변환 비용을 전체 상한과 텍스트 몫에 더한다."""
+        self.budget.add(usd)
+        self.text_budget.add(usd)
+        self._sync_core_fallback()
+
     def text_quality(self, requested: str) -> str:
         """금액 상한을 넘었으면 "더 자연스럽게"(luna)도 로컬 Gemma(basic)로 바꾼다."""
         return requested if self.api_allowed else "basic"
@@ -485,40 +547,80 @@ class QueueManager:
         return self._wait_for(self._jobs_ahead())
 
     def progress(self, gid: str) -> dict | None:
-        """만드는 중인 작업의 진행 상황 (V3). 끝났거나 모르는 작업이면 None.
+        """만드는 중인 작업의 진행 상황. 끝났거나 모르는 작업이면 None.
 
-        stage: queued / running, jobs_ahead: 먼저 처리될 작업 수, estimated_seconds: 남은 예상 시간
+        - stage: queued / running, jobs_ahead: 먼저 처리될 작업 수
+        - estimated_seconds: 남은 예상 시간. 예상보다 늦으면 0 + overdue=True
+        - elapsed_seconds: 접수 후 지난 시간 (프론트 막대는 이 값으로 그림)
+        - phase: text / image / saving (core가 알려 준 지금 하는 일), step·steps: klein 단계
         """
         job = self._active.get(gid)
         if job is None or job.is_finished or job.cancelled:
             return None
         now = time.monotonic()
-        extra = job.route != "primary"
-        per_job = self.extra_seconds_per_job if extra else self.seconds_per_job
-        if job.state == JobState.RUNNING and job.started_mono is not None:
-            left = max(1.0, per_job - (now - job.started_mono))
+        avg = self.speeds.get(_speed_key(job))
+        base = {
+            "elapsed_seconds": round(now - job.submitted_mono, 1),
+            "overdue": False,
+            "phase": None,
+            "step": None,
+            "steps": None,
+        }
+        if job.state == JobState.RUNNING:
+            left = avg - (now - (job.call_started_mono or job.started_mono or now))
+            token = job.deadline
+            phase = job.phase or (token.phase if token else None)
             return {
+                **base,
                 "stage": "running",
                 "jobs_ahead": 0,
-                "estimated_seconds": round(left, 1),
+                "estimated_seconds": round(max(0.0, left), 1),
+                "overdue": left <= 0,
+                "phase": phase,
+                "step": token.step if token and phase == "image" else None,
+                "steps": token.steps if token and phase == "image" else None,
             }
-        if extra:
+        if job.route != "primary":
             # OpenAI 자리를 기다리는 중 (동시 EXTRA_CONCURRENCY개)
             return {
+                **base,
                 "stage": "queued",
                 "jobs_ahead": 0,
-                "estimated_seconds": round(per_job, 1),
+                "estimated_seconds": round(avg, 1),
             }
         waiting = [
             j for j in list(self._queue._queue) if not j.cancelled
         ]  # asyncio.Queue 안의 순서
         position = next((i for i, j in enumerate(waiting) if j is job), len(waiting))
-        ahead = position + len(self._running)
+        # 워커가 다 차 있으면 가장 먼저 끝날 작업을 기다림 + 내 앞 대기 작업 + 내 작업
+        running = [self._active[i] for i in self._running if i in self._active]
+        first_free = 0.0
+        if len(running) >= self.concurrency:
+            first_free = min(
+                max(
+                    0.0,
+                    self.speeds.get(_speed_key(r))
+                    - (now - (r.call_started_mono or r.started_mono or now)),
+                )
+                for r in running
+            )
+        estimated = first_free + math.ceil(position / self.concurrency) * avg + avg
         return {
+            **base,
             "stage": "queued",
-            "jobs_ahead": ahead,
-            "estimated_seconds": self._wait_for(ahead),
+            "jobs_ahead": position + len(self._running),
+            "estimated_seconds": round(estimated, 1),
         }
+
+    def section_progress(self, detail_page_id: str) -> dict[int, dict]:
+        """상세페이지 칸별 진행 상황 {칸 번호: progress}. 만드는 중인 칸만."""
+        out = {}
+        for job in list(self._active.values()):
+            if job.detail_page_id == detail_page_id and job.section_index is not None:
+                p = self.progress(job.id)
+                if p is not None:
+                    out[job.section_index] = p
+        return out
 
     def cancel(self, job: Job, reason: str) -> None:
         """작업을 취소한다. 대기 중이면 건너뛰고, 실행 중이면 core가 멈추게 한다.
@@ -560,6 +662,8 @@ class QueueManager:
         """제한 시간을 걸고 생성기를 호출한다. 시간이 지나면 core 작업도 멈춘다."""
         timeout = self.settings.generation_timeout_seconds
         job.deadline = Deadline(timeout + DEADLINE_GRACE_SECONDS)
+        job.call_started_mono = time.monotonic()
+        job.phase = None
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
@@ -617,6 +721,7 @@ class QueueManager:
                 )
                 continue
             self._update_speed(time.monotonic() - started)
+            self.speeds.add(_speed_key(job), time.monotonic() - started)
             await self._finish(job, output, self.primary)
             return
 
@@ -669,12 +774,14 @@ class QueueManager:
             self.extra_seconds_per_job = (
                 0.7 * self.extra_seconds_per_job + 0.3 * elapsed
             )
+            self.speeds.add(_speed_key(job), elapsed)
             await self._finish(job, output, generator)
 
     async def _finish(
         self, job: Job, output: GenerationOutput, generator: ImageGenerator
     ) -> None:
         job.finished_mono = time.monotonic()
+        job.phase = "saving"
         job.source = output.source or generator.source
         job.model = output.model
         job.prompt = output.prompt

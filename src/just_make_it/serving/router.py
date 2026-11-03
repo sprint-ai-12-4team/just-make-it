@@ -10,6 +10,12 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
+from .assistant import (
+    AssistantService,
+    ConsultEndedError,
+    ConsultNotFoundError,
+    ModerationError,
+)
 from .copywriter import CopyInputError, CopyWriter
 from .detail_pages import (
     DetailPageBusyError,
@@ -27,8 +33,16 @@ from .queue_manager import (
 )
 from .records import GenerationRecords
 from .schemas import (
+    CONSULT_TEXT_MAX,
+    CONVERT_TEXT_MAX,
     IMAGE_QUALITY,
     TEXT_QUALITY,
+    ConsultMessageRequest,
+    ConsultResponse,
+    ConsultStartRequest,
+    ConsultTurnResponse,
+    ConvertRequest,
+    ConvertResponse,
     CopiesRequest,
     CopiesResponse,
     DetailPageRequest,
@@ -43,10 +57,12 @@ from .schemas import (
     GenerationStarted,
     HealthResponse,
     JobState,
+    Purpose,
     SectionRegenerateRequest,
     SectionRegenerateStarted,
     StatsResponse,
     TextEditRequest,
+    TipsResponse,
 )
 from .settings import ServingSettings
 
@@ -153,6 +169,19 @@ def _copywriter(request: Request) -> CopyWriter:
 
 def _detail_pages(request: Request) -> DetailPageService:
     return request.app.state.detail_pages
+
+
+def _assistant(request: Request) -> AssistantService:
+    return request.app.state.assistant
+
+
+def _client_ip(request: Request) -> str | None:
+    """IP당 한도용. Vercel 프록시 뒤라 X-Forwarded-For 첫 값 (설정으로 끌 수 있음)."""
+    if _settings(request).trust_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded.strip():
+            return forwarded.split(",")[0].strip()[:64]
+    return request.client.host if request.client else None
 
 
 def _client_id(value: str | None) -> str:
@@ -310,6 +339,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         style=payload.style,
         adjustments=payload.adjustments,
         reference_image=reference,
+        consult_id=payload.consult_id,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
@@ -667,6 +697,212 @@ async def _read_edited_png(
     return data
 
 
+# ---------------------------------------------------------------------- /tips
+@router.get("/tips", response_model=TipsResponse)
+async def tips(
+    purpose: Purpose | None = None,
+    category: str | None = Query(default=None, max_length=20),
+    limit: int = Query(default=6, ge=1, le=12),
+) -> JSONResponse:
+    """대기 중 정보 카드 (api_spec_consult 2장). 모델 호출 없음.
+
+    - 고르는 순서: 다가오는 시즌(21일 안) → `purpose`·`category`가 맞는 카드 → 후가공 요령·광고 법
+    - `category`: cafe · restaurant · beauty · flower · fashion · etc (모르는 값은 무시)
+    - 카드를 누르면 `POST /events` `type="tip_click"`, `detail={"tip_id": ...}`
+    """
+    from just_make_it.service.tips import CATEGORIES, pick_tips
+
+    picked = pick_tips(
+        purpose, category if category in CATEGORIES else None, limit=limit
+    )
+    body = TipsResponse(tips=picked).model_dump(mode="json")
+    return JSONResponse(body, headers={"Cache-Control": "max-age=600"})
+
+
+# ---------------------------------------------------------------------- /consults
+CONSULT_ERRORS = {
+    400: {"description": "빈 답, 또는 Moderation에 걸린 글"},
+    404: {"description": "없는 상담 (다른 사람의 상담도 404)"},
+    409: {"description": "이미 끝난 상담"},
+    413: {"description": "답이 500자 초과"},
+    429: {"description": "오늘 상담 횟수 초과"},
+    503: {"description": "모델 응답 없음 (로컬 대체도 실패)"},
+}
+MSG_CONSULT_NOT_FOUND = "상담을 찾을 수 없어요."
+MSG_CONSULT_ENDED = "상담이 끝났어요. 바로 만들기로 이어 갈 수 있어요."
+MSG_CONSULT_LIMIT = "오늘 상담 횟수를 다 썼어요. 바로 만들기는 계속 쓸 수 있어요."
+MSG_MODERATION = "광고와 관련된 내용으로 다시 말씀해 주세요."
+MSG_CONVERT_LIMIT = "오늘 바꿀 수 있는 횟수를 다 썼어요."
+
+
+@router.post(
+    "/consults",
+    status_code=201,
+    response_model=ConsultTurnResponse,
+    responses={429: CONSULT_ERRORS[429]},
+    openapi_extra={
+        "requestBody": {
+            **_json_body_doc(
+                ConsultStartRequest, {"purpose": "instagram", "product_name": "소금빵"}
+            ),
+            "required": False,
+        }
+    },
+)
+async def start_consult(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> ConsultTurnResponse:
+    """AI 광고 상담 시작 (api_spec_consult 3-1). 첫 질문은 고정 문구라 모델을 부르지 않음.
+
+    - 질문은 고정 문구 + 칩. 칩을 누르면 모델을 안 부르고, 직접 쓴 답만 luna가 칸에 정리
+    - 칸이 다 차면 terra 1번으로 기획서(`brief`). 기획서는 2번까지 고칠 수 있음 (`edits_left`)
+    - 하루 client 3회 · IP 10회 (`429`)
+    """
+    body = await _read_json(request) if await request.body() else {}
+    payload = _validate(ConsultStartRequest, body)
+    try:
+        turn = await _assistant(request).start_consult(
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.model_dump(exclude_none=True),
+        )
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_CONSULT_LIMIT) from exc
+    return ConsultTurnResponse.model_validate(turn)
+
+
+@router.post(
+    "/consults/{consult_id}/messages",
+    response_model=ConsultTurnResponse,
+    responses=CONSULT_ERRORS,
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            ConsultMessageRequest, {"text": "카페", "chip": True}
+        )
+    },
+)
+async def send_consult(
+    request: Request,
+    consult_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> ConsultTurnResponse:
+    """상담에 답하기 (api_spec_consult 3-2). 대화 기록은 서버에 있어서 새 답만 보냄.
+
+    - 주제 밖 질문은 `200`으로 정중히 되돌림. 같은 상담에서 3번 연속이면 `ended: true`
+    - Moderation에 걸리면 `400` (턴은 세지만 모델은 부르지 않고 글도 남기지 않음)
+    - 기획서가 나온 뒤 보내는 글은 "이렇게 고쳐 주세요"로 받아 기획서를 고침
+    """
+    body = await _read_json(request)
+    if isinstance(body.get("text"), str) and not body["text"].strip():
+        raise HTTPException(status_code=400, detail="답을 입력해 주세요.")
+    payload = _validate(ConsultMessageRequest, body)
+    if len(payload.text) > CONSULT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"답은 {CONSULT_TEXT_MAX}자 이하로 적어 주세요."
+        )
+    try:
+        turn = await _assistant(request).send(
+            consult_id,
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text,
+            payload.chip,
+        )
+    except ConsultNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_CONSULT_NOT_FOUND) from exc
+    except ConsultEndedError as exc:
+        raise HTTPException(status_code=409, detail=MSG_CONSULT_ENDED) from exc
+    except ModerationError as exc:
+        raise HTTPException(status_code=400, detail=MSG_MODERATION) from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return ConsultTurnResponse.model_validate(turn)
+
+
+@router.get(
+    "/consults/{consult_id}",
+    response_model=ConsultResponse,
+    responses={404: CONSULT_ERRORS[404]},
+)
+async def get_consult(
+    request: Request,
+    consult_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> ConsultResponse:
+    """상담 다시 열기 (api_spec_consult 3-3). 만든 사람(`X-Client-Id`)만 볼 수 있음."""
+    try:
+        consult = await _assistant(request).get_consult(
+            consult_id, _client_id(x_client_id)
+        )
+    except ConsultNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_CONSULT_NOT_FOUND) from exc
+    return ConsultResponse.model_validate(consult)
+
+
+# ---------------------------------------------------------------------- /copies/convert
+@router.post(
+    "/copies/convert",
+    response_model=ConvertResponse,
+    responses={
+        400: {"description": "빈 문구, 모르는 format"},
+        413: {"description": "문구 300자 초과"},
+        429: {"description": "오늘 변환 횟수 초과 (client 20회)"},
+        503: {"description": "모델 응답 없음 (로컬 대체도 실패)"},
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            ConvertRequest,
+            {
+                "text": "주말 한정 소금빵 10% 할인",
+                "format": "instagram_hashtags",
+                "product_name": "소금빵",
+                "area": "망원동",
+                "facts": {"discount": "10%", "until": "11월 30일"},
+            },
+        )
+    },
+)
+async def convert_copy(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> ConvertResponse:
+    """고른 광고 문구를 채널별로 올릴 글로 바꿈 (api_spec_consult 4장, 게시 문구 키트).
+
+    - 오타·띄어쓰기를 먼저 정리 (`fixed_typos`)
+    - 할인율·가격·날짜는 문구와 `facts`에 있는 것만. 모델이 지어내면 서버가 빼고 돌려줌
+    - luna로 만들고, 하루 OpenAI 상한을 넘으면 로컬 Gemma (`source: "local"`)
+    """
+    from just_make_it.core.copy_convert import FORMATS
+
+    body = await _read_json(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="바꿀 문구를 입력해 주세요.")
+    if body.get("format") not in FORMATS:
+        raise HTTPException(status_code=400, detail="지원하지 않는 형식이에요.")
+    if len(text.strip()) > CONVERT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"문구는 {CONVERT_TEXT_MAX}자 이하로 보내 주세요."
+        )
+    payload = _validate(ConvertRequest, body)
+    try:
+        result = await _assistant(request).convert(
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text.strip(),
+            payload.format,
+            payload.product_name,
+            payload.area,
+            payload.facts,
+        )
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_CONVERT_LIMIT) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="입력값을 확인해 주세요.") from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return ConvertResponse.model_validate(result)
+
+
 # ---------------------------------------------------------------------- /detail-pages
 @router.post(
     "/detail-pages",
@@ -723,6 +959,10 @@ async def get_detail_page(request: Request, page_id: str) -> DetailPageResponse:
     page = await asyncio.to_thread(_records(request).get_detail_page, page_id)
     if page is None:
         raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    progress = _manager(request).section_progress(page_id)
+    for section in page["sections"]:
+        if section["status"] == "processing":
+            section["progress"] = progress.get(section["index"])
     return DetailPageResponse.model_validate(page)
 
 
