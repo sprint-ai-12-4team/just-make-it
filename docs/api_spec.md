@@ -34,6 +34,11 @@
 | `POST` | `/generations/{id}/image` | 브라우저에서 고친 그림(배경 지우기·글자)을 서버에 저장 — S7 | ⑤ 결과 확인 |
 | `POST` | `/events` | 다운로드·링크 복사·다시 만들기 등 사용 기록 — S4 | ⑤ 결과 확인 |
 | `GET` | `/stats` | 채택률 지표 (생성 · 다운로드 · 직접 고침 · 다시 만들기) — S4 | — (운영·발표) |
+| `GET` | `/tips` | 기다리는 동안 보여 줄 정보 카드 | ④ 대기 |
+| `POST` | `/consults` | AI 광고 상담 시작 (첫 질문) | ① 상담 |
+| `POST` | `/consults/{id}/messages` | 상담에 답하기 → 다 답하면 기획서 | ① 상담 |
+| `GET` | `/consults/{id}` | 상담 다시 열기 (새로고침) | ① 상담 |
+| `POST` | `/copies/convert` | 광고 문구를 채널별로 올릴 글로 바꾸기 (게시 문구 키트) | ⑤ 결과 확인 |
 | `POST` | `/detail-pages` | 상세페이지 생성 시작 (비동기) | ④ 생성 요청 (커머스) |
 | `GET` | `/detail-pages/{id}` | 상세페이지 진행 상황·결과 조회 (폴링) | ④ 대기 → ⑤ 결과 확인 |
 | `POST` | `/detail-pages/{id}/sections/{index}` | 섹션 1개만 다시 생성 | ⑤ 결과 확인 |
@@ -84,6 +89,7 @@
 | `style` | string | | `null` | 분위기 칩 값 |
 | `adjustments` | string[] | | `[]` | "조금 수정하기" 칩 값 |
 | `parent_id` | string | | `null` | 다시 만들기·수정할 때 원본 결과의 `id` |
+| `consult_id` | string | | `null` | AI 상담에서 넘어왔으면 그 상담 `id` (결과 `input`에 남음, 비교용) |
 | `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
 
@@ -178,16 +184,24 @@
 - `processing`이면 `progress`가 함께 옴 (V3). 그 밖에는 `null`
 
   ```json
-  "progress": {"stage": "queued", "jobs_ahead": 2, "estimated_seconds": 60.0}
+  "progress": {"stage": "running", "jobs_ahead": 0, "estimated_seconds": 6.5, "elapsed_seconds": 14.2,
+               "overdue": false, "phase": "image", "step": 2, "steps": 4}
   ```
 
   | 필드 | 값 |
   |------|----|
   | `stage` | `queued` (차례 기다리는 중) · `running` (만드는 중) |
   | `jobs_ahead` | 먼저 처리될 작업 수. 화면 예: "앞에 2건 기다리는 중" |
-  | `estimated_seconds` | 남은 예상 시간(초). 화면 예: "약 1분" |
+  | `estimated_seconds` | 남은 예상 시간(초). 예상보다 늦으면 `0` |
+  | `elapsed_seconds` | 접수 후 지난 시간(초). 막대는 이 값으로 그림 → 새로고침해도 이어지고 PC 시계 차이 없음 |
+  | `overdue` | 예상 시간을 넘겼으면 `true`. 화면: "생각보다 조금 더 걸리고 있어요" |
+  | `phase` | 지금 하는 일: `text`(문구·장면 구상) · `image`(그림) · `saving`(저장). 모르면 `null` |
+  | `step` · `steps` | 그림 모델 단계 (klein은 `steps`=4). OpenAI로 그리면 `null` |
 
-  서버를 다시 켜기 전에 접수한 작업처럼 진행 상황을 모르면 `null`
+  - 남은 시간 평균은 (경로, 이미지 크기, 참고 사진 여부)마다 따로 잼. 서버를 켠 뒤 첫 호출(워밍업)은 넣지 않음
+  - 대기 중: 워커가 다 차 있으면 가장 먼저 끝날 작업의 남은 시간 + 내 앞 대기 수 ÷ 동시 처리 수(올림) × 평균 + 평균
+  - 서버를 다시 켜기 전에 접수한 작업처럼 진행 상황을 모르면 `null`
+  - 상세페이지(`GET /detail-pages/{id}`)의 `sections[i]`에도 `processing`인 칸만 같은 `progress`가 붙음
 
 ### `GET /generations/{id}/family` — 같은 원본에서 만든 결과 (S2)
 
@@ -269,6 +283,11 @@
 | `edit_text` | 글자 직접 고치기 시작 | |
 | `cutout` | 배경 지우고 색 채우기 완료 | |
 | `pick_copy` | 추천 문구 중 하나를 고름 | `{"index": 1, "copy": "…"}` |
+| `add_qr` | 그림에 QR을 붙여 저장 | `{"host": "naver.me"}` (전체 주소는 남기지 않음) |
+| `tip_click` | 대기 카드를 누름 | `{"tip_id": "season-1111"}` (`generation_id`는 지금 기다리는 결과) |
+| `copy_kit` | 게시 문구 키트에서 [복사] | `{"format": "instagram_hashtags"}` |
+
+`flag`(악용 감지)는 서버만 남기는 값이라 보내면 `400`.
 
 ```json
 {"generation_id": "6f1c2b0e-...", "type": "download", "detail": {"edited": false}}
@@ -305,6 +324,118 @@
 | `edited` | 그중 글자 직접 고치기·배경 지우기(`edit_text`·`cutout`)를 했거나 고친 그림을 저장한 결과 수 |
 | `remade` | 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (`parent_id` 기준) |
 | `*_rate` | `generated` 대비 비율 |
+
+### `GET /tips` — 대기 중 정보 카드
+
+기다리는 동안 보여 줄 카드. 모델을 부르지 않습니다 (서버에 적어 둔 카드, `service/tips.py`).
+
+| 쿼리 | 필수 | 설명 |
+|------|:----:|------|
+| `purpose` | | `instagram` 등. 없으면 공통 카드만 |
+| `category` | | 업종 `cafe` · `restaurant` · `beauty` · `flower` · `fashion` · `etc` (모르는 값은 무시) |
+| `limit` | | 기본 6, 최대 12 |
+
+**응답** `200` (`Cache-Control: max-age=600`)
+
+```json
+{"tips": [{"id": "season-1111", "kind": "season", "title": "11월 11일 빼빼로데이", "body": "…",
+           "action": {"label": "빼빼로데이 문구로 만들기", "href": "/create?message=…"}, "source": null, "checked_at": null}]}
+```
+
+- `kind`: `season` 시즌 · `howto` 후가공 요령 · `platform` 플랫폼 제한 · `law` 광고 관련 법 (`support`·`news`는 2차)
+- 고르는 순서: 다가오는 시즌(21일 안, 가까운 순) → `purpose`·`category`가 맞는 카드 → 요령·법 번갈아
+- `platform`·`law`는 `checked_at`(사람이 마지막으로 확인한 날). 공식 도움말 주소를 확인하면 `source`에 넣음
+- 카드를 누르면 `POST /events` `type="tip_click"`
+
+### AI 광고 상담 (`/consults`)
+
+**흐름 (섞기안, 11-02 회의)**: 질문은 고정 문구 + 칩 → 칩을 누르면 모델 호출 없음 → 직접 쓴 답만 luna가 칸에 정리(한 번에 여러 칸을 말하면 뒤 질문은 건너뜀) → 칸이 다 차면 terra 1번으로 기획서 → "조금 고칠래요"는 terra로 2번까지.
+
+질문 순서: 업종 → 이번 목표 → 상품·메뉴 이름 → 주 손님 → 손님이 좋아하는 점 → 행사 기간 → 올릴 곳
+
+#### `POST /consults` — 상담 시작
+
+**요청** JSON (모두 선택, 만들기 화면에서 넘어오면 채워서 보냄)
+
+```json
+{"purpose": "instagram", "product_name": "소금빵"}
+```
+
+**응답** `201`
+
+```json
+{"id": "c_8a1f…", "reply": "안녕하세요 사장님! …어떤 가게를 하고 계세요?", "chips": ["카페", "음식점", "미용", "꽃집", "옷가게"],
+ "allow_free_text": true, "turn": 1, "max_turns": 12, "brief": null, "ended": false, "edits_left": null, "source": null}
+```
+
+- 첫 질문은 고정 문구라 모델을 부르지 않음 (비용 0). `product_name`을 주면 상품 질문의 칩이 그 이름
+- `429`: 오늘 상담 횟수 초과 (client 3회 / IP 10회, 설정값)
+
+#### `POST /consults/{id}/messages` — 답하기
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|:----:|------|
+| `text` | string | ✅ | 사장님 답. 칩을 눌렀으면 칩 글자 그대로. **500자 이하** |
+| `chip` | bool | | 칩을 눌러서 보냈으면 `true` (모델·Moderation을 건너뜀) |
+
+**응답** `200` — 시작과 같은 모양
+
+- 칸이 다 차면 `brief`에 기획서, `edits_left: 2`. 그 뒤에 보내는 글은 "이렇게 고쳐 주세요"로 받음. 0이 되면 `ended: true`
+- `brief` 모양: `category`, `goal`, `product_name`, `period`(답한 그대로, 없으면 `null`), `strengths[]`, `audience`, `purpose`(채널에서 정함, 바꿀 수 없는 채널은 `free`), `channel`, `message`, `copies[2]`, `style`, `reason`, `next_tips[]`
+- 기획서의 숫자(할인율·가격 등)는 답에 있는 것만 남김
+- 주제 밖 답 → `200`으로 정중히 되돌림. 같은 상담에서 3번 연속이면 `ended: true`
+- `source`: 이번 턴에 부른 모델 `openai` · `local`. 칩만 눌렀으면 `null`
+- 오류: `400` 빈 답 또는 Moderation에 걸림(턴은 세지만 모델은 안 부르고 글도 남기지 않음) · `404` 없는 상담(다른 사람의 상담도) · `409` 이미 끝난 상담 · `413` 500자 초과 · `503` 모델 응답 없음(로컬 대체도 실패)
+
+#### `GET /consults/{id}` — 다시 열기
+
+`{"id", "messages": [{"role": "assistant"|"user", "text", "chips"?}], "brief", "ended", "edits_left"}`. 만든 사람(`X-Client-Id`)만 볼 수 있음 (다르면 `404`).
+
+#### 기획서 → 만들기
+
+FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청(`/generate`·`POST /generations`)에 `consult_id`를 같이 보냄 → 결과 `input.consult_id`에 남음 (상담한 경우 vs 안 한 경우 비교용).
+
+### `POST /copies/convert` — 문구 형식 바꾸기 (게시 문구 키트)
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|:----:|------|
+| `text` | string | ✅ | 바꿀 문구 (보통 고른 광고 문구). 300자 이하 |
+| `format` | string | ✅ | 아래 표 |
+| `product_name` | string | | |
+| `area` | string | | 동네 이름 (위치 태그·해시태그에만 씀) |
+| `facts` | object | | 사장님이 입력한 값 (문자열만). 예 `{"discount": "10%", "until": "11월 30일"}` |
+
+| `format` | `result` |
+|----------|----------|
+| `instagram_post` | `string` (본문) |
+| `instagram_hashtags` | `string[]` (10개까지, `#` 포함) |
+| `instagram_location` | `string[]` (위치 태그 후보 3개. `area`가 없으면 빈 배열) |
+| `instagram_story` | `string` |
+| `naver_coupon` | `{"title", "condition", "period"}` |
+| `naver_blog_title` | `string[]` (3개) |
+| `store_description` | `string` |
+
+**응답** `200`
+
+```json
+{"format": "instagram_hashtags", "result": ["#소금빵", "#망원동빵집"], "fixed_typos": true, "source": "openai"}
+```
+
+- 오타·띄어쓰기 정리를 먼저 함 (`fixed_typos`)
+- 숫자는 `text`·`facts`·`product_name`·`area`에 있는 것만. 모델이 지어내면 한 번 다시 시키고, 그래도 남으면 그 항목(목록)이나 그 숫자(글)를 빼고 돌려줌
+- luna로 만들고, 하루 OpenAI 상한(또는 텍스트 몫)을 넘으면 로컬 Gemma (`source: "local"`)
+- 한도: client 하루 20회
+- 오류: `400` 빈 문구·모르는 `format` · `413` 300자 초과 · `422` `facts` 값이 문자열이 아님 · `429` 한도 · `503` 모델 응답 없음
+
+### 상담·변환 공통 (서빙)
+
+- 이미지 대기열에 넣지 않음. 일일 이미지 생성 한도에도 세지 않음
+- OpenAI를 쓰면 이미지와 같은 하루 상한(`OPENAI_DAILY_BUDGET_USD`)에 더하고, 텍스트는 그 상한의 `CONSULT_BUDGET_SHARE`(기본 0.33)까지. 넘으면 로컬 Gemma
+- OpenAI가 실패하면 Gemma로 한 번 더. Gemma 텍스트 호출은 klein과 GPU를 나눠 쓰므로 동시에 1개
+- 사장님이 직접 쓴 상담 글은 OpenAI Moderation(무료)으로 먼저 거름. 칩·변환 문구는 거르지 않음
+- 호출·금액은 `text_calls` 테이블에 남김 (하루 횟수와 금액이 재시작해도 이어짐)
+- IP 한도는 `X-Forwarded-For` 첫 값 (Vercel 프록시 뒤). VM을 직접 공개하면 `TRUST_FORWARDED_FOR=false`
+- 설정: `CONSULT_DAILY_LIMIT`(3) · `CONSULT_IP_DAILY_LIMIT`(10) · `CONSULT_MAX_TURNS`(12) · `CONVERT_DAILY_LIMIT`(20) · `CONSULT_BUDGET_SHARE`(0.33) · `TEXT_TASK_TIMEOUT_SECONDS`(60)
 
 ### `POST /detail-pages` — 상세페이지 생성 시작
 
