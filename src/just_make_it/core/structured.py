@@ -68,8 +68,9 @@ def ask_json(instructions, user_input, schema, name, quality="natural"):
         raise ValueError(f"quality는 {QUALITIES} 중 하나여야 합니다.")
     start = time.perf_counter()
     if quality == "basic":
+        # 한국어 JSON은 토큰을 많이 써서 800이면 기획서(칸 13개)가 잘릴 수 있음
         result = ai_models.get_gemma().generate(
-            instructions, user_input, max_tokens=800, json_schema=schema
+            instructions, user_input, max_tokens=1500, json_schema=schema
         )
         return JsonResult(
             data=_parse(result.text),
