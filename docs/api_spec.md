@@ -92,6 +92,7 @@
 | `consult_id` | string | | `null` | AI 상담에서 넘어왔으면 그 상담 `id` (결과 `input`에 남음, 비교용) |
 | `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
+| `keep_product` | bool | | `false` | 상품 사진 그대로, 배경 장면만 AI ([아래](#keep_product--내-상품-사진-그대로-배경만-ai로-s1)). `true`면 배경을 지운 `reference_image` 필수 |
 
 - **다시 만들기**: 같은 입력 + `parent_id`
 - **조금 수정하기**: 같은 입력 + `parent_id` + `adjustments`
@@ -116,6 +117,7 @@
   "status": "success",
   "image_url": "https://.../6f1c2b0e-....png",
   "background_url": "https://.../6f1c2b0e-...-bg.png",
+  "product_url": null,
   "message": "신메뉴 출시",
   "text_layout": {"position": "top", "font": "yeonsung", "size_scale": 1.0},
   "source": "openai",
@@ -132,6 +134,25 @@
 | `message` | 실제로 얹은 문구. `텍스트 짧게`를 고르면 줄어든 문구가 옴 |
 | `text_layout` | 실제로 얹은 글자 위치·글꼴·크기 ([5. 공통 값](#text_layout--글자-위치글꼴크기)). 결과 화면의 "글자 고치기" 초기값 |
 | `source` | `local` (GPU) 또는 `openai`. 통계용, 화면 노출 금지 |
+
+| `product_url` | `keep_product`일 때 받은 상품 사진(배경 투명). 아니면 `null` |
+
+#### `keep_product` — 내 상품 사진 그대로, 배경만 AI로 (S1)
+
+AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사진 픽셀 그대로 두고 서버는 **상품 없는 장면**만 그립니다 (api_spec_next 4장).
+
+```
+프론트: 사진 → 배경 지우기(투명 PNG) → POST /generate (keep_product=true, reference_image)
+서버:   상품 없는 장면 1장 → background_url(장면) + product_url(받은 사진) + image_url(장면 + 글자)
+프론트: 장면 + 상품(가운데 아래) + 그림자 + 글자 → POST /generations/{id}/image (image, background)
+```
+
+- 장면 프롬프트: 상품 이름·묘사 없이 장면만, 가운데 아래(가로 60%·세로 55%)를 빈 바닥으로, 글자 없음. 사진은 이미지 모델에 넣지 않음 (VRAM·시간은 사진 없는 생성과 같음)
+- 글자는 위(`text_layout.position = "top"`) 고정
+- `400`: 사진이 없거나, 투명한 곳이 없는 사진(배경을 안 지움, JPG 등. 거의 투명한 픽셀이 5% 이상이어야 함). 대기열에 넣기 전에 막음
+- 다시 만들기(`parent_id`)에서 사진을 안 보내면 원본의 사진을 다시 씀 → 같은 상품. 원본이 보통 사진(불투명)이면 `400`
+- `product_url`은 `{id}-product.png`. 고친 그림을 저장해도(`edited: true`) 그대로 남음
+- 결과 `input.keep_product`에 남음. 일일 한도·비용은 보통 생성 1장과 같음
 
 > `/generate`는 **동기 응답**입니다 (보통 10~30초). 기다리는 동안 문구·진행 상황을 보여주려면 같은 본문으로 [`POST /generations`](#post-generations--광고-이미지-생성-비동기-v3)를 씁니다.
 > 30초를 넘는 작업(상세페이지)은 [`POST /detail-pages`](#post-detail-pages--상세페이지-생성-시작)의 비동기 방식을 씁니다.
@@ -167,6 +188,7 @@
   "status": "success",
   "image_url": "https://.../6f1c2b0e-....png",
   "background_url": "https://.../6f1c2b0e-...-bg.png",
+  "product_url": null,
   "message": "신메뉴 출시",
   "text_layout": {"position": "top", "font": "yeonsung", "size_scale": 1.0},
   "source": "openai",
@@ -287,7 +309,7 @@
 | `tip_click` | 대기 카드를 누름 | `{"tip_id": "season-1111"}` (`generation_id`는 지금 기다리는 결과) |
 | `copy_kit` | 게시 문구 키트에서 [복사] | `{"format": "instagram_hashtags"}` |
 
-`flag`(악용 감지)는 서버만 남기는 값이라 보내면 `400`.
+`flag`(악용 감지)는 서버만 남기는 값이라 보내면 `400`. 상담 단계에는 결과 `id`가 없어서 `events` 대신 `flags` 테이블에 남김 (`reason`: `moderation` Moderation에 걸림 · `off_topic` 주제 밖 3번 연속으로 끝남, `consult_id`·`client_id`·`ip`. 원문은 남기지 않음).
 
 ```json
 {"generation_id": "6f1c2b0e-...", "type": "download", "detail": {"edited": false}}
@@ -339,12 +361,16 @@
 
 ```json
 {"tips": [{"id": "season-1111", "kind": "season", "title": "11월 11일 빼빼로데이", "body": "…",
-           "action": {"label": "빼빼로데이 문구로 만들기", "href": "/create?message=…"}, "source": null, "checked_at": null}]}
+           "action": {"label": "빼빼로데이 문구로 만들기", "href": "/create?message=…"}, "source": null, "checked_at": null},
+          {"id": "law-food", "kind": "law", "title": "음식에 '병에 좋다'는 말은 조심", "body": "…", "action": null,
+           "source": {"name": "국가법령정보센터", "url": "https://www.law.go.kr/법령/식품등의표시ㆍ광고에관한법률/제8조"},
+           "checked_at": "2026-11-04"}]}
 ```
 
 - `kind`: `season` 시즌 · `howto` 후가공 요령 · `platform` 플랫폼 제한 · `law` 광고 관련 법 (`support`·`news`는 2차)
 - 고르는 순서: 다가오는 시즌(21일 안, 가까운 순) → `purpose`·`category`가 맞는 카드 → 요령·법 번갈아
-- `platform`·`law`는 `checked_at`(사람이 마지막으로 확인한 날). 공식 도움말 주소를 확인하면 `source`에 넣음
+- `platform`·`law`는 `checked_at`(사람이 마지막으로 확인한 날)
+- `source`: `{name, url}` 공식 도움말·법령 주소 (확인한 카드만, 나머지는 `null`). 지금: 유튜브 썸네일(YouTube 고객센터), 카톡 광고(정보통신망법 제50조), 최고·1위·할인 전 가격(표시광고법 제3조), 음식 효능(식품표시광고법 제8조)
 - 카드를 누르면 `POST /events` `type="tip_click"`
 
 ### AI 광고 상담 (`/consults`)
@@ -434,6 +460,7 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - OpenAI가 실패하면 Gemma로 한 번 더. Gemma 텍스트 호출은 klein과 GPU를 나눠 쓰므로 동시에 1개
 - 사장님이 직접 쓴 상담 글은 OpenAI Moderation(무료)으로 먼저 거름. 칩·변환 문구는 거르지 않음
 - 호출·금액은 `text_calls` 테이블에 남김 (하루 횟수와 금액이 재시작해도 이어짐)
+- 악용 감지(Moderation에 걸림, 주제 밖 3번 연속 종료)는 `flags` 테이블. 지금은 기록만 하고 막지는 않음
 - IP 한도는 `X-Forwarded-For` 첫 값 (Vercel 프록시 뒤). VM을 직접 공개하면 `TRUST_FORWARDED_FOR=false`
 - 설정: `CONSULT_DAILY_LIMIT`(3) · `CONSULT_IP_DAILY_LIMIT`(10) · `CONSULT_MAX_TURNS`(12) · `CONVERT_DAILY_LIMIT`(20) · `CONSULT_BUDGET_SHARE`(0.33) · `TEXT_TASK_TIMEOUT_SECONDS`(60)
 
@@ -591,5 +618,5 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - [ ] 같은 원본 목록(`/family`)은 결과 `id`만 알면 누구나 볼 수 있음 (공유 링크를 받은 사람도 이전 시안을 봄). 로그인(S3) 때 `client_id`로 제한 — PM
 - [ ] `/stats`는 인증 없이 열려 있음 (합계 숫자만 나옴). 외부에 숨기려면 관리자 키 추가 — PM·서빙
 - [ ] 프론트 전환: 비동기 생성(`POST /generations` + 폴링, 선택), 나란히 보기(`/family`), 사용 기록(`/events`), 고친 그림 저장(`/image`) 호출 — 서비스
-- [ ] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 모델·서빙 준비 후
+- [x] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 서빙 11-04. 장면 품질(가운데 아래가 실제로 비는지)은 VM에서 확인 필요 — 모델
 - [x] 단일 이미지는 요청당 1장 (여러 장 후보 생성 없음, V4 보류). 비교는 "한 번 더 만들기" + 같은 원본 목록으로 — PM 10-28
