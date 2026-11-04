@@ -3,8 +3,9 @@
 카드 내용은 프론트 기본 카드(frontend/lib/tips.ts)와 같게 시작했다. 바꿀 때는 이 파일만 고치면 되고,
 서버 카드가 있으면 프론트는 이걸 쓴다.
 - season(시즌 달력)·howto(후가공 요령): 직접 작성
-- platform(플랫폼 제한)·law(광고 관련 법): 사람이 정리. checked_at = 마지막으로 확인한 날.
-  공식 도움말 주소를 확인하면 source에 넣기 (지금은 비어 있음 → 프론트는 출처 없이 보여 줌)
+- platform(플랫폼 제한)·law(광고 관련 법): 사람이 정리. checked_at = 마지막으로 확인한 날
+  (카드에 checked가 있으면 그 날, 없으면 CHECKED).
+  source = 공식 도움말·법령 주소 {name, url}. 확인한 카드만 넣음 (없으면 프론트는 출처 없이 보여 줌)
 - support(지원사업)·news(뉴스): 2차 (공공 API·검색 API를 하루 1번 받아 저장)
 
 고르는 순서: 시즌(오늘부터 21일 안, 가까운 순) → 목적(purpose)·업종(category)이 맞는 카드 → 요령·법 번갈아
@@ -15,6 +16,13 @@ from datetime import date, datetime, timedelta, timezone
 KST = timezone(timedelta(hours=9))
 SEASON_DAYS = 21
 CHECKED = "2026-11-02"
+
+
+def _law(name: str, article: str | None = None) -> dict:
+    """국가법령정보센터 주소 (법령 이름 그대로 쓰는 고정 주소)."""
+    url = f"https://www.law.go.kr/법령/{name.replace(' ', '')}"
+    return {"name": "국가법령정보센터", "url": f"{url}/{article}" if article else url}
+
 
 # (id, kind, title, body, 조건). 조건: date(MM-DD, 시즌), purposes, categories, action
 TIPS: list[dict] = [
@@ -144,8 +152,13 @@ TIPS: list[dict] = [
         "id": "platform-yt-size",
         "kind": "platform",
         "purposes": ["youtube"],
-        "title": "유튜브 썸네일은 2MB까지",
-        "body": "파일이 크면 올라가지 않아요. 저장한 그림이 크다면 JPG로 바꿔 올려 보세요.",
+        "title": "유튜브 썸네일, 휴대폰 앱은 2MB까지",
+        "body": "PC에서는 50MB까지 올라가지만 휴대폰 앱은 2MB까지예요. 앱에서 안 올라가면 JPG로 바꿔 보세요.",
+        "source": {
+            "name": "YouTube 고객센터",
+            "url": "https://support.google.com/youtube/answer/72431?hl=ko",
+        },
+        "checked": "2026-11-04",
     },
     {
         "id": "platform-yt-time",
@@ -160,6 +173,8 @@ TIPS: list[dict] = [
         "purposes": ["kakao"],
         "title": "광고 메시지는 맨 앞에 (광고)",
         "body": "카톡·문자로 광고를 보낼 때는 '(광고)' 표시와 수신 거부 방법을 넣어야 해요. 밤 9시~아침 8시에는 따로 동의가 필요해요.",
+        "source": _law("정보통신망 이용촉진 및 정보보호 등에 관한 법률", "제50조"),
+        "checked": "2026-11-04",
     },
     # 법 (모든 곳 공통, "법률 자문이 아니에요"는 화면에서 붙임)
     {
@@ -167,6 +182,8 @@ TIPS: list[dict] = [
         "kind": "law",
         "title": "'최고·1위'에는 근거가 필요해요",
         "body": "근거(출처·기준일) 없이 쓰면 표시광고법에 걸릴 수 있어요.",
+        "source": _law("표시ㆍ광고의 공정화에 관한 법률", "제3조"),
+        "checked": "2026-11-04",
     },
     {
         "id": "law-food",
@@ -174,12 +191,16 @@ TIPS: list[dict] = [
         "categories": ["cafe", "restaurant"],
         "title": "음식에 '병에 좋다'는 말은 조심",
         "body": "일반 식품에 질병 예방·치료 효과를 적으면 안 돼요.",
+        "source": _law("식품 등의 표시ㆍ광고에 관한 법률", "제8조"),
+        "checked": "2026-11-04",
     },
     {
         "id": "law-discount",
         "kind": "law",
         "title": "할인 전 가격은 실제로 팔던 가격",
         "body": "올린 적 없는 가격에서 깎아 주는 것처럼 보이면 문제가 될 수 있어요.",
+        "source": _law("표시ㆍ광고의 공정화에 관한 법률", "제3조"),
+        "checked": "2026-11-04",
     },
     {
         "id": "law-face",
@@ -251,5 +272,7 @@ def _public(t: dict) -> dict:
         "body": t.get("body"),
         "action": t.get("action"),
         "source": t.get("source"),
-        "checked_at": CHECKED if t["kind"] in ("platform", "law") else None,
+        "checked_at": (
+            t.get("checked", CHECKED) if t["kind"] in ("platform", "law") else None
+        ),
     }

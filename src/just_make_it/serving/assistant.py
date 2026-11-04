@@ -361,6 +361,7 @@ class AssistantService:
             c["turn"] += 1
             await asyncio.to_thread(self.records.save_consult, c)
             logger.warning("상담 Moderation 걸림 consult=%s", cid)
+            await self._flag("moderation", cid, client_id, ip)
             raise ModerationError(cid)
 
         start = c["start"]
@@ -433,7 +434,20 @@ class AssistantService:
         c["messages"].append({"role": "user", "text": text})
         c["messages"].append({"role": "assistant", "text": reply, "chips": chips})
         await asyncio.to_thread(self.records.save_consult, c)
+        if c["off_topic"] >= MAX_OFF_TOPIC:  # 이번 턴에 주제 밖 3번 연속으로 끝남
+            await self._flag("off_topic", cid, client_id, ip)
         return self._turn(c, reply, chips, source)
+
+    async def _flag(
+        self, reason: str, cid: str, client_id: str, ip: str | None
+    ) -> None:
+        """악용 감지 기록 (flags 테이블). 기록이 실패해도 상담 응답은 그대로."""
+        try:
+            await asyncio.to_thread(
+                self.records.add_flag, reason, client_id, ip, consult_id=cid
+            )
+        except Exception:
+            logger.warning("flag 기록 실패 consult=%s", cid, exc_info=True)
 
     def _off_topic(self, c: dict, reply: str, chips: list) -> tuple[str, list]:
         c["off_topic"] += 1

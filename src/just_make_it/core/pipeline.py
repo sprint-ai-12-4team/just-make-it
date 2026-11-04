@@ -17,6 +17,8 @@ VM의 로컬 모델(klein, Gemma)이 실패하면 API 모델(flare, luna)로 폴
 - combined: 문구를 얹은 이미지. 글자 없는 이미지와 문구 레이어도 같이 줘서 웹에서 문구를 옮길 수 있음
 - image: 글자 없는 이미지만. 문구는 얹지 않고 추천 글꼴과 위치만 줌
 - text: 디자인된 문구 레이어(투명 PNG)만. 이미지 모델을 부르지 않아 GPU와 비용이 들지 않음
+keep_product=True면 상품 없는 장면만 그리고 문구는 위쪽(top)에 얹음. 사용자 상품 사진(배경을 지운 PNG)은
+이미지 모델에 넣지 않고, 프론트가 장면 가운데 아래에 그대로 놓음 (api_spec_next 4장)
 세 형태 모두 문구 위치, 글꼴, 크기(text_layout)와 문구 레이어 위치(text_box)를 같이 줌.
 글자만 고칠 때는 이미지를 다시 만들지 않고 text_overlay.render_text로 background_bytes에 다시 얹음
 """
@@ -36,7 +38,11 @@ from just_make_it.core.copywriter import (
     shorten_message,
 )
 from just_make_it.core.product_dictionary import lookup
-from just_make_it.core.prompt_builder import build_image_prompt, get_image_size
+from just_make_it.core.prompt_builder import (
+    build_image_prompt,
+    build_scene_prompt,
+    get_image_size,
+)
 from just_make_it.core.text_overlay import (
     overlay_text,
     place_text,
@@ -114,6 +120,7 @@ def generate_ad_image(
     seed=None,
     image_quality="fast",
     text_quality="basic",
+    keep_product=False,
 ):
     """프론트 입력값으로 광고 이미지를 생성합니다.
 
@@ -128,12 +135,15 @@ def generate_ad_image(
         seed: 비우면 랜덤. 조금 수정하기 때 이전 결과의 seed를 넘기면 구도가 유지됨 (klein만 적용)
         image_quality: 그림 품질. fast(빠르게, klein) 또는 detailed(더 정교하게, flare)
         text_quality: 문구 품질. basic(기본, Gemma) 또는 natural(더 자연스럽게, luna)
+        keep_product: True면 상품 없는 장면만 그림 (reference_image 필수, 모델에는 넣지 않음).
+            문구 위치는 top 고정
 
     Returns:
         AdImageResult: 이미지와 생성 정보
 
     Raises:
-        ValueError: 필수 입력이 비었거나, output이나 품질 값이 잘못됐거나, 참고 사진을 읽을 수 없을 때
+        ValueError: 필수 입력이 비었거나, output이나 품질 값이 잘못됐거나, 참고 사진을 읽을 수 없을 때,
+            keep_product인데 참고 사진이 없을 때
         TextGenerationError: 텍스트 모델이 실패했을 때 (폴백까지 실패 포함)
         ImageGenerationError: 이미지 모델이 실패했을 때 (폴백까지 실패 포함)
     """
@@ -145,8 +155,14 @@ def generate_ad_image(
     if image_quality not in IMAGE_QUALITIES:
         raise ValueError(f"image_quality는 {IMAGE_QUALITIES} 중 하나여야 합니다.")
     check_text_quality(text_quality)
+    if keep_product and reference_image is None:
+        raise ValueError("keep_product에는 배경을 지운 상품 사진이 필요합니다.")
     adjustments = adjustments or []
+    # keep_product는 사진을 모델에 넣지 않음 (넣으면 상품을 다시 그림). 읽을 수 있는지만 확인
     reference_png = _to_png(reference_image) if reference_image is not None else None
+    if keep_product:
+        reference_png = None
+    text_position = "top" if keep_product else None
     size_scale = 1.25 if BIGGER_TEXT_ADJUSTMENT in adjustments else 1.0
     width, height = get_image_size(purpose)
 
@@ -164,7 +180,7 @@ def generate_ad_image(
         text_sec = time.perf_counter() - start
         start = time.perf_counter()
         layer_bytes, placement = render_text_layer(
-            message, style, (width, height), size_scale
+            message, style, (width, height), size_scale, position=text_position
         )
         return AdImageResult(
             output=output,
@@ -198,29 +214,47 @@ def generate_ad_image(
     text_reason = describe_reason or text_reason
     text_sec = time.perf_counter() - start
 
-    prompt = build_image_prompt(
-        product_en,
-        scene_en,
-        purpose=purpose,
-        style=style,
-        has_reference=reference_png is not None,
-        adjustments=adjustments,
-    )
+    if keep_product:
+        prompt = build_scene_prompt(
+            scene_en, purpose=purpose, style=style, adjustments=adjustments
+        )
+    else:
+        prompt = build_image_prompt(
+            product_en,
+            scene_en,
+            purpose=purpose,
+            style=style,
+            has_reference=reference_png is not None,
+            adjustments=adjustments,
+        )
     start = time.perf_counter()
     deadline.report("image")
     result, image_reason = _generate_image(
-        product_name, prompt, width, height, reference_png, seed, image_quality
+        product_name,
+        prompt,
+        width,
+        height,
+        reference_png,
+        seed,
+        image_quality,
+        scene_only=keep_product,
     )
     image_sec = time.perf_counter() - start
 
     start = time.perf_counter()
     if output == "combined":
         final_bytes, layer_bytes, placement = overlay_text(
-            result.image_bytes, message, style, size_scale=size_scale
+            result.image_bytes,
+            message,
+            style,
+            size_scale=size_scale,
+            position=text_position,
         )
     else:
         final_bytes, layer_bytes = result.image_bytes, None
-        placement = place_text(result.image_bytes, message, style, size_scale)
+        placement = place_text(
+            result.image_bytes, message, style, size_scale, position=text_position
+        )
     overlay_sec = time.perf_counter() - start
     width, height = Image.open(io.BytesIO(final_bytes)).size
 
@@ -255,12 +289,20 @@ def _placement_fields(placement):
 
 
 def _generate_image(
-    product_name, prompt, width, height, reference_png, seed, image_quality
+    product_name,
+    prompt,
+    width,
+    height,
+    reference_png,
+    seed,
+    image_quality,
+    scene_only=False,
 ):
     """품질에 맞는 이미지 모델로 만듭니다.
 
     detailed면 처음부터 flare를 쓰고, fast면 klein으로 만들되 아래 경우에는 flare로 폴백합니다.
     - 품목 사전에서 klein이 못 그리는 품목(local_ok=False)인데 참고 사진이 없을 때: 처음부터 flare
+      (scene_only면 상품을 그리지 않으므로 해당 없음)
     - klein을 불러오지 못했거나 생성에 실패했을 때 (GPU 없음, 메모리 부족 등)
 
     Returns:
@@ -275,6 +317,7 @@ def _generate_image(
     entry = lookup(product_name)
     if (
         config.USE_FALLBACK
+        and not scene_only
         and entry
         and not entry["local_ok"]
         and reference_png is None

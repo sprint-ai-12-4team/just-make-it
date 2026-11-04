@@ -98,6 +98,7 @@ class CoreGenerator(ImageGenerator):
                 seed=spec.seed,
                 image_quality=self.image_quality,
                 text_quality=spec.text_quality,
+                keep_product=spec.keep_product,
             )
         except ValueError as exc:
             # 입력 오류는 다시 시도하거나 다른 모델로 넘겨도 같은 결과
@@ -130,6 +131,7 @@ class CoreGenerator(ImageGenerator):
                 "text_fallback_reason": result.text_fallback_reason,
                 "product_source": result.product_source,
                 "used_reference": result.used_reference,
+                "keep_product": spec.keep_product,
                 "overlay_ms": int(round(result.overlay_sec * 1000)),
             },
         )

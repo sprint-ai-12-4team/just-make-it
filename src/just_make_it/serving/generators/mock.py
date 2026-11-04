@@ -69,7 +69,12 @@ class MockGenerator(ImageGenerator):
 
             size_scale = 1.25 if BIGGER_TEXT in spec.adjustments else 1.0
             final, layout = render_text(
-                background, spec.message, spec.style, size_scale=size_scale
+                background,
+                spec.message,
+                spec.style,
+                size_scale=size_scale,
+                # keep_product는 상품이 아래에 오므로 글자는 위 (core와 같음)
+                position="top" if spec.keep_product else None,
             )
         return GenerationOutput(
             image_bytes=final,
@@ -81,5 +86,8 @@ class MockGenerator(ImageGenerator):
             height=height,
             prompt=f"[mock] {spec.product_name} / {spec.message}",
             cost_usd=0.0,
-            params={"text_quality": spec.text_quality},
+            params={
+                "text_quality": spec.text_quality,
+                "keep_product": spec.keep_product,
+            },
         )

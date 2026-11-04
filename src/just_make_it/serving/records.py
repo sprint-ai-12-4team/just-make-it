@@ -62,6 +62,7 @@ class GenerationRecords:
                 "style": spec.style,
                 "adjustments": spec.adjustments,
                 **({"consult_id": spec.consult_id} if spec.consult_id else {}),
+                **({"keep_product": True} if spec.keep_product else {}),
             },
             backend=backend,
             model=model,
@@ -79,8 +80,11 @@ class GenerationRecords:
         route: Route,
         queue_ms: int | None,
         image_ms: int | None,
+        product: bytes | None = None,
     ) -> dict:
         """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양.
+
+        product: keep_product일 때 받은 투명 상품 사진 (`{id}-product.png`, `product_url`)
 
         시간은 따로 기록한다: queue_ms 대기, output.text_ms 문구, image_ms 그림 모델.
         생성기 호출 전체 시간은 params의 run_ms.
@@ -93,6 +97,7 @@ class GenerationRecords:
             height=output.height,
             background=output.background_bytes,
             text_layout=output.text_layout,
+            product=product,
             params={**output.params, "fallback_reason": output.fallback_reason},
             backend=source,
             route=route,
@@ -243,6 +248,21 @@ class GenerationRecords:
         self, kind: str, *, client_id: str | None = None, ip: str | None = None
     ) -> int:
         return db.count_text_calls(kind, client_id=client_id, ip=ip)
+
+    def add_flag(
+        self,
+        reason: str,
+        client_id: str,
+        ip: str | None,
+        *,
+        consult_id: str | None = None,
+    ) -> None:
+        db.add_flag(reason, client_id, ip, consult_id=consult_id)
+
+    def count_flags(
+        self, *, client_id: str | None = None, ip: str | None = None
+    ) -> int:
+        return db.count_flags(client_id=client_id, ip=ip)
 
     # ------------------------------------------------------------------ 상세페이지
     def start_detail_page(self, client_id: str, input: dict) -> str:

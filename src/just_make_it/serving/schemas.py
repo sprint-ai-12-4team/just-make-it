@@ -67,6 +67,8 @@ class GenerateRequest(BaseModel):
     text_model: TextModel | None = None
     # AI 상담에서 넘어왔으면 그 상담 id (상담한 경우 vs 안 한 경우 비교용, 결과 input에 남음)
     consult_id: str | None = Field(default=None, max_length=64)
+    # 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장). 배경을 지운 PNG·WEBP가 필요
+    keep_product: bool = False
 
     _strip = field_validator("product_name", "message", "style", mode="before")(
         _strip_text
@@ -119,6 +121,8 @@ class GenerateSuccessResponse(BaseModel):
     image_url: str
     # 글자 없는 원본. 글자 고치기는 서버가 여기에 다시 얹는다
     background_url: str | None = None
+    # keep_product일 때 배경이 투명한 상품 사진. 프론트가 장면(background_url) 위에 합침
+    product_url: str | None = None
     # 실제로 얹은 문구 ("텍스트 짧게"를 누르면 줄어든 문구)
     message: str
     text_layout: TextLayout | None = None
@@ -134,6 +138,7 @@ class GenerationInput(BaseModel):
     style: str | None = None
     adjustments: list[str] = Field(default_factory=list)
     consult_id: str | None = None
+    keep_product: bool = False
 
 
 class GenerationProgress(BaseModel):
@@ -163,6 +168,8 @@ class GenerationResponse(BaseModel):
     status: Literal["processing", "success", "error"]
     image_url: str | None = None
     background_url: str | None = None
+    # keep_product일 때 배경이 투명한 상품 사진 (아니면 None)
+    product_url: str | None = None
     message: str | None = None
     # 글자 고치기 전 예전 결과·상세페이지 칸 이미지는 None
     text_layout: TextLayout | None = None
@@ -364,6 +371,8 @@ class GenerationSpec:
     seed: int | None = None
     # AI 상담에서 넘어왔으면 그 상담 id (기록용)
     consult_id: str | None = None
+    # 상품 없는 장면만 그림. reference_image는 상품(투명 PNG)으로 저장만 하고 모델에는 넣지 않음
+    keep_product: bool = False
     # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
     # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
     output: Literal["combined", "image"] = "combined"

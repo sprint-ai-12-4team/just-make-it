@@ -8,6 +8,7 @@
   글자 고치기: background(원본 바이트) → (core render_text) → update_text
   고친 그림 저장: replace_image (api_spec_next 2) / 같은 원본 목록: family (3) / 사용 기록: add_event (1)
   상담: start_consult → get_consult → save_consult / 텍스트 호출 기록: add_text_call, count_text_calls, text_cost_today
+  악용 감지: add_flag, count_flags (상담 단계라 events 대신 flags 테이블)
 
 ponytail: 로컬 SQLite·디스크는 ms 단위라 동기 함수. 이벤트 루프가 막히면 서빙에서 asyncio.to_thread로 감싸기
 """
@@ -86,11 +87,13 @@ def finish_generation(
     background: bytes | None = None,
     text_layout: dict | None = None,
     params: dict | None = None,
+    product: bytes | None = None,
     **result,
 ) -> dict:
     """이미지 저장 + 성공 기록. result: backend(fallback이면 바뀐 값), model, seed, image_ms 등 _RESULT_COLS.
 
     image: 글자를 얹은 최종 이미지. background: 글자 없는 원본 (글자 고치기용). text_layout: {position, font, size_scale}
+    product: keep_product일 때 배경이 투명한 상품 사진 (api_spec_next 4) → product_url
     """
     if bad := set(result) - _RESULT_COLS:
         raise TypeError(f"모르는 열: {bad}")
@@ -98,6 +101,8 @@ def finish_generation(
     params = {**(params or {}), "width": width, "height": height}
     if background is not None:
         params["background_path"] = storage.save(f"{gid}-bg.png", background)
+    if product is not None:
+        params["product_path"] = storage.save(f"{gid}-product.png", product)
     sets = "".join(f", {k}=?" for k in result)
     _run(
         f"""UPDATE generations SET status='success', image_path=?, copy_json=?, params_json=?{sets}
@@ -263,6 +268,7 @@ def get_generation(gid: str) -> dict | None:
         "status": r["status"],
         "image_url": storage.url(r["image_path"]),
         "background_url": storage.url(params.get("background_path")),
+        "product_url": storage.url(params.get("product_path")),
         "message": copy.get("message", input.get("message")),
         "text_layout": copy.get("text_layout"),
         "source": r["backend"],
@@ -456,3 +462,28 @@ def count_text_calls(kind: str, *, client_id: str | None = None, ip: str | None 
 def text_cost_today() -> float:
     """오늘(한국 시간) 텍스트 호출 OpenAI 금액 합(달러)."""
     return float(_run(f"SELECT SUM(cost_usd) FROM text_calls WHERE created_at >= {_TODAY}")[0][0] or 0)
+
+
+FLAG_REASONS = {"moderation", "off_topic"}
+
+
+def add_flag(reason: str, client_id: str, ip: str | None, *, consult_id: str | None = None) -> None:
+    """악용 감지 1건 (원문은 남기지 않음). 모르는 reason이면 ValueError."""
+    if reason not in FLAG_REASONS:
+        raise ValueError(f"모르는 reason: {reason}")
+    _run(
+        "INSERT INTO flags (reason, client_id, ip, consult_id) VALUES (?, ?, ?, ?)",
+        (reason, client_id, ip, consult_id),
+    )
+
+
+def count_flags(*, client_id: str | None = None, ip: str | None = None) -> int:
+    """오늘(한국 시간) 악용 감지 수. client_id·ip를 주면 그 사람·그 IP만."""
+    sql, args = f"SELECT COUNT(*) FROM flags WHERE created_at >= {_TODAY}", []
+    if client_id is not None:
+        sql += " AND client_id=?"
+        args.append(client_id)
+    if ip is not None:
+        sql += " AND ip=?"
+        args.append(ip)
+    return _run(sql, tuple(args))[0][0]

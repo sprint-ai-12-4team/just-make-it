@@ -233,7 +233,9 @@ def _speed_key(job: "Job") -> tuple[str, str, bool]:
     except Exception:  # 모르는 목적이면 크기 구분 없이
         size = "?"
     kind = "primary" if job.route == "primary" else "extra"
-    return kind, size, job.spec.reference_image is not None
+    # keep_product는 사진을 모델에 넣지 않으므로 사진 없는 생성과 같은 속도
+    has_ref = job.spec.reference_image is not None and not job.spec.keep_product
+    return kind, size, has_ref
 
 
 class _Speeds:
@@ -807,6 +809,7 @@ class QueueManager:
                 route=job.route,
                 queue_ms=job.queue_ms,
                 image_ms=job.image_ms,
+                product=job.spec.reference_image if job.spec.keep_product else None,
             )
         except Exception as exc:
             self._fail(job, f"결과 저장 실패: {exc!r}", ERROR_GENERIC)
@@ -863,6 +866,7 @@ class QueueManager:
                 "style": job.spec.style,
                 "adjustments": job.spec.adjustments,
                 "has_reference_image": job.spec.reference_image is not None,
+                "keep_product": job.spec.keep_product,
             },
             "image_prompt": job.prompt,
             "image_path": f"{job.id}.png" if job.result else None,

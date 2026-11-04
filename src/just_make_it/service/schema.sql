@@ -120,3 +120,17 @@ CREATE TABLE IF NOT EXISTS text_calls (
 
 CREATE INDEX IF NOT EXISTS idx_text_calls_day
     ON text_calls (kind, created_at);
+
+-- [추가] 악용 감지 기록 (상담 Moderation에 걸림·주제 밖 3번 연속 종료). 원문은 남기지 않음.
+-- events는 결과(generation_id)가 있어야 해서, 결과가 없는 상담 단계는 여기에 남김
+CREATE TABLE IF NOT EXISTS flags (
+    id            INTEGER PRIMARY KEY,
+    reason        TEXT NOT NULL,                    -- moderation, off_topic
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    consult_id    TEXT REFERENCES consults(id),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_flags_client
+    ON flags (client_id, created_at);

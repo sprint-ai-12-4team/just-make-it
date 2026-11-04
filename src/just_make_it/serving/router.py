@@ -88,6 +88,12 @@ MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 �
 MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
 MSG_EVENT_BAD = "기록할 수 없는 요청이에요."
+MSG_KEEP_PRODUCT_PHOTO = "상품 그대로 쓰려면 배경을 지운 상품 사진을 올려 주세요."
+MSG_KEEP_PRODUCT_CUTOUT = (
+    "배경이 투명한 사진(PNG·WEBP)만 상품 그대로 쓸 수 있어요. 먼저 배경을 지워 주세요."
+)
+# 투명한 칸이 이만큼은 있어야 배경을 지운 사진으로 본다 (거의 투명한 픽셀 비율)
+CUTOUT_MIN_TRANSPARENT = 0.05
 
 
 def _json_body_doc(model, example: dict) -> dict:
@@ -251,7 +257,7 @@ async def copies(request: Request) -> CopiesResponse:
     "/generate",
     response_model=GenerateSuccessResponse,
     responses={
-        400: {"description": "필수값 누락"},
+        400: {"description": "필수값 누락, keep_product인데 배경을 지운 사진이 없음"},
         413: {"description": "사진 10MB 초과"},
         415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
         429: {"description": "하루 생성 한도 초과"},
@@ -272,6 +278,8 @@ async def generate(
       `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
     - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록)
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
+    - `keep_product`: 상품 사진(배경을 지운 PNG·WEBP) 그대로, 서버는 상품 없는 장면만 그린다.
+      글자는 위쪽, 응답의 `product_url`(받은 상품 사진)을 프론트가 장면 가운데 아래에 합친다
     - 기다리는 동안 진행 상황을 보여주려면 같은 본문으로 `POST /generations`(202 + 조회)를 쓴다
     """
     settings = _settings(request)
@@ -293,7 +301,7 @@ async def generate(
     status_code=202,
     response_model=GenerationStarted,
     responses={
-        400: {"description": "필수값 누락"},
+        400: {"description": "필수값 누락, keep_product인데 배경을 지운 사진이 없음"},
         413: {"description": "사진 10MB 초과"},
         415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
         429: {"description": "하루 생성 한도 초과"},
@@ -330,6 +338,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
     body, reference = await _parse_form_body(request, settings)
     payload = _validate(GenerateRequest, body)
     _check_lengths(payload, settings)
+    reference = await _product_photo(request, payload, reference)
 
     manager = _manager(request)
     spec = GenerationSpec(
@@ -340,6 +349,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         adjustments=payload.adjustments,
         reference_image=reference,
         consult_id=payload.consult_id,
+        keep_product=payload.keep_product,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
@@ -359,6 +369,39 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         raise HTTPException(status_code=503, detail=MSG_BUSY) from exc
     except DailyLimitError as exc:
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+
+
+async def _product_photo(
+    request: Request, payload: GenerateRequest, reference: bytes | None
+) -> bytes | None:
+    """keep_product면 배경을 지운 상품 사진을 확인한다 (api_spec_next 4장).
+
+    다시 만들기(`parent_id`)에서 사진을 안 보내면 원본의 사진을 쓴다. 없거나 투명한 곳이 없으면 400.
+    """
+    if not payload.keep_product:
+        return reference
+    if reference is None and payload.parent_id:
+        reference = await asyncio.to_thread(
+            _records(request).load_reference, payload.parent_id
+        )
+    if reference is None:
+        raise HTTPException(status_code=400, detail=MSG_KEEP_PRODUCT_PHOTO)
+    if not _is_cutout(reference):
+        raise HTTPException(status_code=400, detail=MSG_KEEP_PRODUCT_CUTOUT)
+    return reference
+
+
+def _is_cutout(png: bytes) -> bool:
+    """배경을 지운 사진인지: 알파 채널이 있고 거의 투명한 픽셀이 CUTOUT_MIN_TRANSPARENT 이상."""
+    try:
+        image = Image.open(io.BytesIO(png))
+        if image.mode != "RGBA":
+            return False
+        histogram = image.getchannel("A").histogram()
+    except (UnidentifiedImageError, OSError):
+        return False
+    total = sum(histogram)
+    return bool(total) and sum(histogram[:16]) / total >= CUTOUT_MIN_TRANSPARENT
 
 
 def _image_size(purpose: str) -> tuple[int, int]:
