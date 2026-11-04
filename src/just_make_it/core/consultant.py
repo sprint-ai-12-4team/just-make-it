@@ -136,6 +136,10 @@ _CHANNEL_PURPOSE = [
     ("유튜브", "youtube"),
 ]
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+# 숫자 + 바로 뒤 단위. 긴 단위를 앞에 둬야 "개월"이 "개"로, "시간"이 "시"로 잘리지 않음
+_NUMBER_UNIT = re.compile(
+    r"(\d+(?:[.,]\d+)*)\s*(%|퍼센트|만\s?원|천\s?원|원|개월|개|명|인분|잔|병|일|주|시간|시|분|회|차)?"
+)
 
 
 def first_question(product_name=None):
@@ -230,9 +234,9 @@ def purpose_for(channel, purpose_hint=None):
 
 
 def _keep_numbers(text, allowed):
-    """답에 없는 숫자는 뺌 (지어낸 할인율·가격 방지)."""
+    """답에 없는 숫자는 단위까지 같이 뺌 (지어낸 할인율·가격 방지, "% 할인"처럼 남지 않게)."""
     allowed = {a.replace(",", "") for a in allowed}
-    out = _NUMBER.sub(
-        lambda m: m.group() if m.group().replace(",", "") in allowed else "", text
+    out = _NUMBER_UNIT.sub(
+        lambda m: m.group() if m.group(1).replace(",", "") in allowed else "", text
     )
     return re.sub(r"[ \t]{2,}", " ", out).strip()

@@ -80,6 +80,10 @@ RULES = """\
 - 상품 이름·동네 이름은 입력된 그대로"""
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+# 숫자 + 바로 뒤 단위. 긴 단위를 앞에 둬야 "개월"이 "개"로, "시간"이 "시"로 잘리지 않음
+_NUMBER_UNIT = re.compile(
+    r"(\d+(?:[.,]\d+)*)\s*(%|퍼센트|만\s?원|천\s?원|원|개월|개|명|인분|잔|병|일|주|시간|시|분|회|차)?"
+)
 
 
 def convert_copy(
@@ -202,14 +206,15 @@ def _numbers(text):
 
 
 def _drop_numbers(result, invented):
-    """지어낸 숫자가 든 부분을 뺌: 목록은 그 항목을, 글은 그 숫자를."""
+    """지어낸 숫자가 든 부분을 뺌: 목록은 그 항목을, 글은 그 숫자와 단위를."""
 
     def has(s):
         return bool(_numbers(s) & invented)
 
     def strip(s):
-        out = _NUMBER.sub(
-            lambda m: "" if m.group().replace(",", "") in invented else m.group(), s
+        out = _NUMBER_UNIT.sub(
+            lambda m: "" if m.group(1).replace(",", "") in invented else m.group(),
+            s,
         )
         return re.sub(r"[ \t]{2,}", " ", out).strip()
 
