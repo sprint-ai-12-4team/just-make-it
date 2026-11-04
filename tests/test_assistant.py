@@ -354,7 +354,7 @@ def test_core_consultant_read_and_brief(monkeypatch):
     assert brief["purpose"] == "kakao"  # 채널에서 정함
     assert brief["copies"] == [
         "갓 구운 소금빵",
-        "% 할인 소금빵",
+        "할인 소금빵",
     ]  # 답에 없는 30은 뺌, 2개까지
 
 
