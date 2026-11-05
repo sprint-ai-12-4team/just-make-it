@@ -62,6 +62,26 @@ SCENE: 메시지와 분위기를 살린 사진 장면을 영어 한 문장으로
 DEFAULT_PRODUCT = "a freshly made product"
 DEFAULT_SCENE = "an inviting close-up shot of the product"
 
+# keep_product: 사장님 상품 사진을 프론트가 장면 위에 그대로 올리므로, 장면 묘사에 상품이 들어가면
+# 이미지 모델이 상품을 또 그려서 상품이 두 개 보임. 그래서 상품 없이 배경만 묘사하게 함
+SCENE_ONLY_RULES = """\
+너는 광고 사진 기획자야. 사장님이 상품 사진을 따로 올려서, 이미지 모델은 상품 없이 배경 장면만 그려.
+한국어 광고 정보를 보고, 상품이 놓일 자리를 비워 둔 배경 장면을 영어로 묘사해.
+규칙
+- 반드시 영어로만 쓰고 한글은 쓰지 않기
+- 상품 자체나 상품과 같은 종류의 음식, 물건은 장면에 넣지 않기 (그 자리에 상품 사진이 올라감)
+- 장소, 바닥이나 테이블 재질, 주변 소품, 조명, 색감만 묘사하기
+- 사람, 손은 넣지 않기
+- 글자, 간판, 로고, 포스터, 메뉴판처럼 문자가 들어가는 물건은 묘사하지 않기
+- 아래 한 줄 형식만 출력하기
+SCENE: 상품 없는 배경 장면을 영어 한 문장으로
+
+예시
+- 상품: 떡볶이 / 메시지: 매운맛 신메뉴 / 분위기: 강렬한
+  SCENE: A dark slate counter in a cozy street food stall with warm red lanterns glowing in the blurred background"""
+
+DEFAULT_BACKDROP = "a clean wooden table top in a softly lit room"
+
 
 def check_text_quality(text_quality):
     """문구 추천 품질 값이 맞는지 확인합니다.
@@ -148,7 +168,9 @@ def shorten_message(message, text_quality="basic"):
     return (copies[0] if copies else message), result, reason
 
 
-def describe_for_image(product_name, message, style=None, text_quality="basic"):
+def describe_for_image(
+    product_name, message, style=None, text_quality="basic", scene_only=False
+):
     """상품과 메시지를 이미지 모델용 영어 묘사로 바꿉니다.
 
     품목 사전에 있는 상품은 사람이 쓴 생김새 묘사를 그대로 쓰고, 장면 묘사만 텍스트 모델이 씁니다.
@@ -159,6 +181,7 @@ def describe_for_image(product_name, message, style=None, text_quality="basic"):
         message: 핵심 메시지
         style: 분위기 칩 값
         text_quality: basic(Gemma) 또는 natural(luna)
+        scene_only: True면 상품 없는 배경 장면만 묘사 (keep_product). 상품 묘사와 출처는 빈 문자열
 
     Returns:
         tuple: (상품 묘사, 장면 묘사, 상품 묘사 출처, TextResult, 폴백 이유)
@@ -170,7 +193,8 @@ def describe_for_image(product_name, message, style=None, text_quality="basic"):
     user_input = f"상품: {product_name} / 메시지: {message}"
     if style:
         user_input += f" / 분위기: {style}"
-    result, reason = generate_text(SCENE_RULES, user_input, text_quality)
+    rules = SCENE_ONLY_RULES if scene_only else SCENE_RULES
+    result, reason = generate_text(rules, user_input, text_quality)
     text = result.text
 
     product = re.search(r"PRODUCT\W*:\W*(.+)", text, re.IGNORECASE)
@@ -178,6 +202,8 @@ def describe_for_image(product_name, message, style=None, text_quality="basic"):
     product = _remove_korean(product.group(1)) if product else ""
     scene = _remove_korean(scene.group(1)) if scene else ""
 
+    if scene_only:
+        return "", scene or DEFAULT_BACKDROP, "", result, reason
     entry = lookup(product_name)
     if entry:
         return entry["description"], scene or DEFAULT_SCENE, "품목 사전", result, reason

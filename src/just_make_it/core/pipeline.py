@@ -207,7 +207,9 @@ def generate_ad_image(
         )
 
     product_en, scene_en, product_source, describe_result, describe_reason = (
-        describe_for_image(product_name, message, style, text_quality)
+        describe_for_image(
+            product_name, message, style, text_quality, scene_only=keep_product
+        )
     )
     text_cost += describe_result.cost_usd
     text_model = describe_result.model
