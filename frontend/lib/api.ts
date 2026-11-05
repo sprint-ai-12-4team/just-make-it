@@ -1,5 +1,5 @@
 import { mock } from "./mock";
-import type { Consult, ConsultTurn, ConvertFormat, ConvertResult, DetailInput, DetailPage, EventType, FamilyItem, GenerateInput, Generation, Purpose, TextModel, Tip } from "./types";
+import type { Consult, ConsultTurn, ConvertFormat, ConvertResult, DetailInput, DetailPage, EventType, FamilyItem, GenerateInput, Generation, Purpose, Stats, TextModel, Tip } from "./types";
 
 // next.config.ts의 rewrites로 NEXT_PUBLIC_API_URL에 프록시. https(Vercel) → http(VM) 혼합 콘텐츠·CORS 회피
 const BASE = "/api/backend";
@@ -102,6 +102,8 @@ const real = {
   sendConsult: (id: string, text: string, chip: boolean) =>
     call<ConsultTurn>(`/consults/${id}/messages`, { method: "POST", body: toBody({ text, chip }) }),
   getConsult: (id: string) => call<Consult>(`/consults/${id}`),
+  /** 운영·발표용 정량평가. 새 칸은 서빙 미구현이면 없음 */
+  getStats: (days: number) => call<Stats>(`/stats?days=${days}`),
   convertCopy: (b: { text: string; format: ConvertFormat; product_name?: string; area?: string; facts?: Record<string, string> }) =>
     call<{ result: ConvertResult; fixed_typos: boolean }>("/copies/convert", { method: "POST", body: toBody(b) }),
 };

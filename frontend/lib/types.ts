@@ -200,3 +200,21 @@ export const TEXT_MODELS: { id: TextModel; title: string; desc: string }[] = [
   { id: "gemma-4-12b-it", title: "기본", desc: "빠른 문구 추천" },
   { id: "openai-gpt-5.6-luna", title: "더 자연스럽게", desc: "문장을 더 다듬어 드려요" },
 ];
+
+/** GET /stats 한 행 (api_spec "GET /stats"). 뒤쪽 칸은 서빙 미구현이라 없을 수 있음 */
+export interface RefStats { generated: number; download_rate: number; remake_rate: number }
+export interface DailyStats {
+  date: string; generated: number; downloaded: number; edited: number; remade: number;
+  download_rate: number; edit_rate: number; remake_rate: number;
+  seconds_p50?: number | null; seconds_p95?: number | null; local_rate?: number | null;
+  cost_usd?: number | null; cost_per_image_usd?: number | null; error_rate?: number | null;
+  by_reference?: { upload: RefStats; stock: RefStats; none: RefStats };
+}
+export interface Stats { days: DailyStats[]; total: DailyStats }
+
+/** public/eval/summary.json (모델 오프라인 평가. make_report.py가 만듦). 숫자는 null 가능 */
+export interface EvalRun {
+  run_id: string; cases: number; avg_seconds: number | null; p95_seconds: number | null; cost_usd: number | null;
+  fallback_rate: number | null; clip_score: number | null; ref_similarity: number | null; ocr_match: number | null;
+}
+export interface EvalSummary { generated_at: string; runs: EvalRun[] }

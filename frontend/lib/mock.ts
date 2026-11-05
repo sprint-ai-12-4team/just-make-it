@@ -1,5 +1,5 @@
 // ponytail: 서빙(API)이 생기기 전 화면 개발용 가짜 응답. NEXT_PUBLIC_MOCK=1일 때만 사용. 서빙 연결 후 파일째 삭제
-import { SIZES, type Brief, type Consult, type ConsultTurn, type ConvertFormat, type ConvertResult, type DetailInput, type DetailPage, type EventType, type FamilyItem, type GenerateInput, type Generation, type Purpose } from "./types";
+import { SIZES, type Brief, type Consult, type ConsultTurn, type ConvertFormat, type ConvertResult, type DetailInput, type DetailPage, type EventType, type FamilyItem, type GenerateInput, type Generation, type Purpose, type Stats } from "./types";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const load = <T>(k: string): T | null => JSON.parse(sessionStorage.getItem(k) ?? "null");
@@ -229,6 +229,21 @@ export const mock = {
     if (b.format === "naver_coupon" && b.facts)
       result = { title: `${b.facts.discount ?? ""} ${b.text}`.trim(), condition: b.facts.discount ? `${b.facts.discount} 할인` : "(조건을 적어 주세요)", period: b.facts.until ? b.facts.until.replace(/(까지)?$/, "까지") : "(기간을 적어 주세요)" };
     return { result, fixed_typos: false };
+  },
+  async getStats(days: number): Promise<Stats> {
+    await wait(300);
+    const rows = Array.from({ length: Math.min(days, 7) }, (_, i) => {
+      const generated = 40 - i * 3;
+      return { date: new Date(Date.now() - i * 864e5).toISOString().slice(0, 10), generated, downloaded: Math.round(generated * 0.55), edited: Math.round(generated * 0.3), remade: Math.round(generated * 0.375), download_rate: 0.55, edit_rate: 0.3, remake_rate: 0.375 };
+    }).reverse();
+    return {
+      days: rows,
+      total: {
+        date: "total", generated: 40, downloaded: 22, edited: 12, remade: 15, download_rate: 0.55, edit_rate: 0.3, remake_rate: 0.375,
+        seconds_p50: 14.2, seconds_p95: 41.0, local_rate: 0.85, cost_usd: 0.42, cost_per_image_usd: 0.0105, error_rate: 0.02,
+        by_reference: { upload: { generated: 22, download_rate: 0.68, remake_rate: 0.27 }, stock: { generated: 8, download_rate: 0.5, remake_rate: 0.38 }, none: { generated: 10, download_rate: 0.3, remake_rate: 0.5 } },
+      },
+    };
   },
   async regenerateSection(id: string, index: number) {
     const d = load<{ redo: Record<number, number> }>(`mock_d_${id}`)!;
