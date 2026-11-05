@@ -32,6 +32,11 @@ gpu = [
     "torch>=2.15.0",
     "transformers>=5.22.1",
 ]
+eval = [
+    "easyocr>=1.7.2",
+    "torch>=2.15.0",
+    "transformers>=5.22.1",
+]
 
 [project.scripts]
 just-make-it = "just_make_it:main"
