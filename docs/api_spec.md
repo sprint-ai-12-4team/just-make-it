@@ -38,6 +38,7 @@
 | `POST` | `/consults` | AI 광고 상담 시작 (첫 질문) | ① 상담 |
 | `POST` | `/consults/{id}/messages` | 상담에 답하기 → 다 답하면 기획서 | ① 상담 |
 | `GET` | `/consults/{id}` | 상담 다시 열기 (새로고침) | ① 상담 |
+| `POST` | `/advice` | AI 광고 조언 (자유 대화, 서빙 라우트 미구현) | ① 상담 |
 | `POST` | `/copies/convert` | 광고 문구를 채널별로 올릴 글로 바꾸기 (게시 문구 키트) | ⑤ 결과 확인 |
 | `POST` | `/detail-pages` | 상세페이지 생성 시작 (비동기) | ④ 생성 요청 (커머스) |
 | `GET` | `/detail-pages/{id}` | 상세페이지 진행 상황·결과 조회 (폴링) | ④ 대기 → ⑤ 결과 확인 |
@@ -92,6 +93,7 @@
 | `consult_id` | string | | `null` | AI 상담에서 넘어왔으면 그 상담 `id` (결과 `input`에 남음, 비교용) |
 | `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
+| `reference_source` | string | | `null` | 참고 사진 출처: `upload` 직접 올림 · `stock` Pixabay에서 고름 · `null` 사진 없음 ([아래](#reference_source--참고-사진-출처)) |
 | `keep_product` | bool | | `false` | 상품 사진 그대로, 배경 장면만 AI ([아래](#keep_product--내-상품-사진-그대로-배경만-ai로-s1)). `true`면 배경을 지운 `reference_image` 필수 |
 
 - **다시 만들기**: 같은 입력 + `parent_id`
@@ -175,6 +177,14 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 
 - 에러는 `/generate`와 같음 (`400`·`413`·`415`·`422`·`429`, 대기열이 가득 차면 `503`). 생성 자체의 실패는 조회 응답의 `status: "error"`로 알 수 있음
 - 동기 `/generate`와 달리 응답을 기다리다 작업을 취소하지 않음 → 화면을 닫았다 와도 같은 `id`로 결과를 볼 수 있음
+
+#### `reference_source` — 참고 사진 출처
+
+프론트가 사진 없을 때 Pixabay 후보를 보여 주고(프론트 `app/api/pixabay`), 고르면 그 사진을 `reference_image`로 올립니다. 정량평가에서 "사진 있음/없음/고른 사진"을 나눠 보려고 출처만 받습니다.
+
+- `reference_image` 없이 `upload`·`stock`이 오면 `null`로 저장 (오류 아님). 모르는 값은 `422`
+- `parent_id`로 다시 만들면 원본 값을 이어 씀
+- 조회 응답 `input.reference_source`로 돌려줌
 
 ### `GET /generations/{id}` — 결과 조회
 
@@ -347,6 +357,24 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 | `remade` | 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (`parent_id` 기준) |
 | `*_rate` | `generated` 대비 비율 |
 
+**정량평가 추가 칸** (11-04, 서빙 미구현 — 각 행에 추가. 새 테이블 없이 `generations` 열로 집계. 발표 "정량평가" 장표의 출처)
+
+| 필드 | 뜻 | 계산 |
+|---|---|---|
+| `seconds_p50`, `seconds_p95` | 생성 시간 (대기 포함) | `queue_ms + text_ms + image_ms` |
+| `local_rate` | 로컬 GPU로 만든 비율 | `backend = 'local'` / 성공 수 |
+| `cost_usd` | OpenAI 비용 합 | `SUM(cost_usd)` |
+| `cost_per_image_usd` | 1장당 비용 | `cost_usd / generated` |
+| `error_rate` | 실패 비율 | `status = 'error'` / 전체 |
+| `by_reference` | 참고 사진 출처별 `{generated, download_rate, remake_rate}` | 키 `upload`·`stock`·`none` |
+
+```json
+{"date": "total", "generated": 40, "download_rate": 0.55, "seconds_p50": 14.2, "seconds_p95": 41.0, "local_rate": 0.85, "cost_usd": 0.42, "cost_per_image_usd": 0.0105, "error_rate": 0.02,
+ "by_reference": {"upload": {"generated": 22, "download_rate": 0.68, "remake_rate": 0.27}, "stock": {"generated": 8, "download_rate": 0.5, "remake_rate": 0.38}, "none": {"generated": 10, "download_rate": 0.3, "remake_rate": 0.5}}}
+```
+
+- `mock` 결과는 집계에서 뺌
+
 ### `GET /tips` — 대기 중 정보 카드
 
 기다리는 동안 보여 줄 카드. 모델을 부르지 않습니다 (서버에 적어 둔 카드, `service/tips.py`).
@@ -420,6 +448,18 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 #### 기획서 → 만들기
 
 FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청(`/generate`·`POST /generations`)에 `consult_id`를 같이 보냄 → 결과 `input.consult_id`에 남음 (상담한 경우 vs 안 한 경우 비교용).
+
+### `POST /advice` — AI 광고 조언 (자유 대화)
+
+상담(`/consults`)은 칸을 채워 기획서를 만드는 용도, 이건 자유롭게 묻는 용도. 대화 기록은 서버가 들고 있음. core `advisor.advise`는 있고 **서빙 라우트만 없음**.
+
+**요청** `{"advice_id": null, "text": "손님이 동네 주민인데 어디에 올려요?", "consult_id": null}`
+- `advice_id`가 `null`이면 새 대화. `consult_id`가 있으면 그 기획서를 `context`로 넘김
+- `text` 500자 이하
+
+**응답** `200` `{"advice_id": "…", "reply": "…", "chips": ["…"], "go_create": false, "ended": false}`
+- `go_create: true`면 프론트가 "이미지 만들러 가기" 버튼을 보여 줌
+- 하루 횟수·턴 수·Moderation·주제 밖 3회 종료·금액 상한은 `/consults`와 같은 규칙 (`429`, `409` 끝난 대화)
 
 ### `POST /copies/convert` — 문구 형식 바꾸기 (게시 문구 키트)
 
@@ -612,7 +652,7 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - [ ] 일일 생성 한도 값, 비로그인 허용 여부 — PM
 - [ ] 참고 사진 최대 크기 10MB 확정 — 서빙·모델
 - [ ] 프리미엄(OpenAI 강제) 요청 필드 필요 여부 — PM·서비스
-- [ ] 글자 자유 위치(드래그) — 지금은 위·가운데·아래 3곳. 필요하면 `text_layout`에 `x`·`y`(0~1 비율) 추가 — PM·모델
+- [x] 글자 자유 위치 → 닫음 (11-04). 프론트 canvas에서 단어별 위치·크기·글꼴·색까지 고치고 `POST /generations/{id}/image`로 저장. `text_layout`에 `x`·`y` 추가 안 함 — PM
 - [x] 다시 만들기 때 원본 참고 사진: 조회 응답에 사진이 없어 프론트가 다시 못 보냄 → 서버가 `parent_id`의 참고 사진을 재사용 — 서빙
 - [x] 사용 기록·고친 그림 저장·같은 원본 목록 → PM·서비스 추가 명세(api_spec_next, 10-28) 그대로 반영. 서비스 함수 `db.add_event`·`db.replace_image`·`db.family` + 서빙 라우트
 - [ ] 같은 원본 목록(`/family`)은 결과 `id`만 알면 누구나 볼 수 있음 (공유 링크를 받은 사람도 이전 시안을 봄). 로그인(S3) 때 `client_id`로 제한 — PM
@@ -620,3 +660,5 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - [ ] 프론트 전환: 비동기 생성(`POST /generations` + 폴링, 선택), 나란히 보기(`/family`), 사용 기록(`/events`), 고친 그림 저장(`/image`) 호출 — 서비스
 - [x] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 서빙 11-04. 장면 품질(가운데 아래가 실제로 비는지)은 VM에서 확인 필요 — 모델
 - [x] 단일 이미지는 요청당 1장 (여러 장 후보 생성 없음, V4 보류). 비교는 "한 번 더 만들기" + 같은 원본 목록으로 — PM 10-28
+- [ ] 서빙 요청 (11-04): `POST /advice` 라우트 · `reference_source` 저장(`input_json`) · `GET /stats` 정량평가 칸 — 서빙
+- [ ] 모델 요청 (오프라인 정량평가, API 아님): `core/evaluation/run_eval.py`의 `results.csv`에 `clip_score`(프롬프트-그림) · `ref_similarity`(참고 사진-결과, 사진 있는 실행만) · `ocr_match`(얹은 문구 OCR 일치율, `combined`만) 열 추가, `make_report.py`에 실행별 평균·p95 표. 비교 실행 `v1`(사진 없음)·`v1_ref`(사진 있음)·`v1_api`(OpenAI), 같은 13개 케이스. 채점 모델(CLIP·OCR)은 평가 때만 CPU로 띄우고 서빙 이미지·VRAM에 넣지 않음 — 모델
