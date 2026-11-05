@@ -53,19 +53,62 @@ const MOOD_STYLE: Record<string, string> = {
 };
 export const styleFor = (mood?: string | null) => TEXT_STYLES.find((s) => s.id === MOOD_STYLE[mood ?? ""]) ?? TEXT_STYLES[0];
 
-/** x·y: 문구 덩어리 가운데 위치 (이미지 대비 0~1). scale: 글자 크기 배율 */
+/** 단어별로 나눠 고칠 때 한 단어. 비어 있는 값은 전체 설정(TextState)을 따름 */
+export interface WordState {
+  text: string;
+  x: number; // 단어 가운데 (이미지 대비 0~1)
+  y: number;
+  size: number; // 나누던 순간의 글자 크기 (이미지 가로 대비, 전체 배율 1 기준)
+  scale?: number; // 이 단어만 키우기·줄이기
+  style?: string;
+  font?: string;
+  color?: string;
+}
+
+/** x·y: 문구 덩어리 가운데 위치 (이미지 대비 0~1). scale: 글자 크기 배율. font·color: 스타일 대신 쓸 글꼴·색
+ *  words가 있으면 단어마다 따로 그림 (scale·style·font·color는 전체에 한꺼번에 적용) */
 export interface TextState {
   text: string;
   style: string;
   x: number;
   y: number;
   scale: number;
+  font?: string;
+  color?: string;
+  words?: WordState[];
+}
+
+/** 화면 표시·끌기용 글자 영역 (이미지 대비 0~1) */
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 // 서버 text_layout.position의 세로 범위 가운데 (core POSITIONS)
 export const POSITION_Y = { top: 0.205, middle: 0.5, bottom: 0.795 } as const;
 
-export const loadFont = (s: TextStyle) => document.fonts.load(`40px "${s.font}"`);
+// 글꼴만 바꾸기용 (globals.css @font-face 이름)
+export const FONTS = [
+  { id: "Jua", name: "주아" },
+  { id: "YeonSung", name: "연성" },
+  { id: "GowunBatang", name: "고운바탕" },
+  { id: "GowunDodum", name: "고운돋움" },
+  { id: "BlackHanSans", name: "검은고딕" },
+];
+
+const styleOf = (id?: string) => TEXT_STYLES.find((t) => t.id === id) ?? TEXT_STYLES[0];
+
+/** 그릴 때 쓰는 글꼴을 모두 받아 둠 (단어별 글꼴 포함). 실패해도 기본 글꼴로 그림 */
+export function loadFonts(s: TextState) {
+  const fonts = new Set([s.font ?? styleOf(s.style).font]);
+  for (const w of s.words ?? []) fonts.add(w.font ?? s.font ?? styleOf(w.style ?? s.style).font);
+  return Promise.all([...fonts].map((f) => document.fonts.load(`40px "${f}"`))).catch(() => {});
+}
+
+/** 단어 → 문구 (단어별 편집 중에도 text를 맞춰 둬 다시 만들기·저장·문구 키트가 그대로 동작) */
+export const joinWords = (words: WordState[]) => words.map((w) => w.text.trim()).filter(Boolean).join(" ");
 
 /** 글자 뒤 배경 밝기 (0~255). auto·gold 색 고르기용 */
 function brightness(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): number {
@@ -83,24 +126,23 @@ function brightness(ctx: CanvasRenderingContext2D, x: number, y: number, w: numb
 // 서버 POSITIONS 한 칸의 높이 (이미지 대비). 서버는 문구가 이 높이의 85%를 넘으면 글자를 줄임
 const AREA_H = 0.35;
 
-/** 원본 이미지(또는 canvas) + 문구를 canvas에 그림. 글꼴은 loadFont로 먼저 받아 둘 것 */
-export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLCanvasElement, s: TextState) {
-  const st = TEXT_STYLES.find((t) => t.id === s.style) ?? TEXT_STYLES[0];
-  const W = (canvas.width = bg instanceof HTMLImageElement ? bg.naturalWidth : bg.width);
-  const H = (canvas.height = bg instanceof HTMLImageElement ? bg.naturalHeight : bg.height);
-  const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(bg, 0, 0);
-  if (!s.text.trim()) return;
+const setFont = (ctx: CanvasRenderingContext2D, st: TextStyle, font: string, size: number) => {
+  ctx.font = `${size}px "${font}"`;
+  ctx.letterSpacing = `${size * st.tracking}px`;
+};
 
-  // core design_text와 같은 규칙: 정해진 너비·높이에 들어갈 때까지 2px씩 줄임 → 서버가 얹은 줄 수·크기와 맞춤
+/** 한 덩어리 문구의 줄·크기·가운데 (core design_text와 같은 규칙) */
+function layoutBlock(ctx: CanvasRenderingContext2D, s: TextState, W: number, H: number) {
+  const st = styleOf(s.style);
+  const font = s.font ?? st.font;
+  // 정해진 너비·높이에 들어갈 때까지 2px씩 줄임 → 서버가 얹은 줄 수·크기와 맞춤
   // 크기를 키우면(scale > 1) 높이 한도도 같이 늘려서 슬라이더가 먹히게 함
   const maxW = W * Math.min(0.9, st.maxWidth * s.scale);
   const maxH = H * AREA_H * 0.85 * Math.max(1, s.scale);
   let size = Math.floor(W * st.size * s.scale);
   let lines: string[] = [], widths: number[] = [];
   for (;;) {
-    ctx.font = `${size}px "${st.font}"`;
-    ctx.letterSpacing = `${size * st.tracking}px`;
+    setFont(ctx, st, font, size);
     lines = wrap((t) => ctx.measureText(t).width, s.text, maxW);
     widths = lines.map((l) => ctx.measureText(l).width);
     if ((Math.max(...widths) <= maxW && size * 1.22 * lines.length <= maxH) || size <= W * 0.04) break;
@@ -112,11 +154,35 @@ export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLC
   // 끌어도 문구 덩어리(+장식 여백)가 이미지 밖으로 나가지 않게
   const fit = (v: number, half: number, max: number) => Math.min(Math.max(v, half), Math.max(half, max - half));
   const cx = fit(s.x * W, blockW / 2 + size * 0.3, W), cy = fit(s.y * H, blockH / 2 + size * 0.45, H);
+  return { st, font, size, lines, widths, lineH, blockW, blockH, cx, cy };
+}
+
+interface Piece {
+  st: TextStyle;
+  font: string;
+  color?: string;
+  size: number;
+  lines: string[];
+  widths: number[];
+  cx: number;
+  cy: number;
+  deco: boolean;
+}
+
+/** 줄 묶음 하나를 (cx, cy) 가운데에 스타일 효과와 함께 그림. 그린 영역(px)을 돌려줌 */
+function drawPiece(ctx: CanvasRenderingContext2D, W: number, p: Piece) {
+  const { st, size, lines, widths, cx, cy } = p;
+  setFont(ctx, st, p.font, size);
+  const lineH = size * 1.22;
+  const blockW = Math.max(...widths);
+  const blockH = lineH * lines.length;
+  const box = { x: cx - blockW / 2 - size * 0.3, y: cy - blockH / 2 - size * 0.3, w: blockW + size * 0.6, h: blockH + size * 0.6 };
 
   const dark = brightness(ctx, cx - blockW / 2, cy - blockH / 2, blockW, blockH) < 150;
-  const fill = st.fill === "auto" ? (dark ? "#fff" : "rgb(38,38,38)") : st.fill === "gold" ? (dark ? "rgb(236,214,160)" : "rgb(70,48,28)") : st.fill;
-  const decoColor = st.decoColor === "same" ? fill : st.decoColor ?? fill;
-  const shadowColor = (st.fill === "auto" || st.fill === "gold") && !dark ? "rgba(255,255,255,.6)" : st.shadow?.[0];
+  const auto = !p.color && (st.fill === "auto" || st.fill === "gold");
+  const fill = p.color ?? (st.fill === "auto" ? (dark ? "#fff" : "rgb(38,38,38)") : st.fill === "gold" ? (dark ? "rgb(236,214,160)" : "rgb(70,48,28)") : st.fill);
+  const decoColor = st.decoColor === "same" || p.color ? fill : st.decoColor ?? fill;
+  const shadowColor = auto && !dark ? "rgba(255,255,255,.6)" : st.shadow?.[0];
 
   ctx.save();
   ctx.translate(cx, cy);
@@ -130,7 +196,8 @@ export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLC
   const ly = (i: number) => -blockH / 2 + lineH * (i + 0.5);
 
   if (st.back) {
-    const [kind, color] = st.back;
+    // 단어마다 가로 전체 띠를 깔면 겹쳐서 진해짐 → 단어별일 때는 상자로
+    const [kind, color] = st.back[0] === "band" && !p.deco ? (["box", st.back[1]] as const) : st.back;
     ctx.fillStyle = color;
     const pad = size * 0.45;
     if (kind === "band") ctx.fillRect(-cx, -blockH / 2 - pad, W, blockH + pad * 2);
@@ -177,6 +244,13 @@ export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLC
   }
   ctx.shadowColor = "transparent";
 
+  // ponytail: 장식(반짝이·물결 등)은 문구 덩어리에만. 단어마다 붙이면 지저분해서 뺌
+  if (p.deco) drawDeco(ctx, st, size, widths, blockW, blockH, left, ly, decoColor);
+  ctx.restore();
+  return box;
+}
+
+function drawDeco(ctx: CanvasRenderingContext2D, st: TextStyle, size: number, widths: number[], blockW: number, blockH: number, left: number, ly: (i: number) => number, decoColor: string) {
   ctx.strokeStyle = decoColor;
   ctx.fillStyle = decoColor;
   ctx.lineCap = "round";
@@ -226,7 +300,59 @@ export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLC
     ctx.lineTo(left + size * 1.3, top - size * 0.3);
     ctx.stroke();
   }
-  ctx.restore();
+}
+
+/** 원본 이미지(또는 canvas) + 문구를 canvas에 그림. 글꼴은 loadFonts로 먼저 받아 둘 것.
+ *  돌려주는 값: 글자 영역들 (단어별이면 단어 순서대로, 아니면 덩어리 하나) */
+export function drawText(canvas: HTMLCanvasElement, bg: HTMLImageElement | HTMLCanvasElement, s: TextState): Box[] {
+  const W = (canvas.width = bg instanceof HTMLImageElement ? bg.naturalWidth : bg.width);
+  const H = (canvas.height = bg instanceof HTMLImageElement ? bg.naturalHeight : bg.height);
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bg, 0, 0);
+  const rel = (b: { x: number; y: number; w: number; h: number }): Box => ({ x: b.x / W, y: b.y / H, w: b.w / W, h: b.h / H });
+
+  if (s.words) {
+    return s.words.map((w) => {
+      const st = styleOf(w.style ?? s.style);
+      const font = w.font ?? s.font ?? st.font;
+      const size = Math.max(4, W * w.size * (w.scale ?? 1) * s.scale);
+      setFont(ctx, st, font, size);
+      const text = w.text.trim();
+      if (!text) return { x: w.x, y: w.y, w: 0, h: 0 };
+      return rel(drawPiece(ctx, W, { st, font, color: w.color ?? s.color, size, lines: [text], widths: [ctx.measureText(text).width], cx: w.x * W, cy: w.y * H, deco: false }));
+    });
+  }
+  if (!s.text.trim()) return [];
+  const l = layoutBlock(ctx, s, W, H);
+  return [rel(drawPiece(ctx, W, { ...l, color: s.color, deco: true }))];
+}
+
+/** 한 덩어리 문구를 지금 보이는 자리 그대로 단어로 나눔. 줄이 바뀌는 곳도 단어 경계로 봄 */
+export function splitWords(W: number, H: number, s: TextState): TextState {
+  const ctx = document.createElement("canvas").getContext("2d")!;
+  const l = layoutBlock(ctx, s, W, H);
+  const rad = (-l.st.rotate * Math.PI) / 180;
+  const words: WordState[] = [];
+  l.lines.forEach((line, i) => {
+    const left = l.st.align === "left" ? -l.blockW / 2 : -l.widths[i] / 2;
+    const y = -l.blockH / 2 + l.lineH * (i + 0.5);
+    let at = 0;
+    for (const part of line.split(" ")) {
+      const start = ctx.measureText(line.slice(0, at)).width;
+      at += part.length + 1;
+      if (!part) continue;
+      // 덩어리를 기울이고 돌린 것과 같게 단어 가운데를 옮김 (그리기: 회전 → 기울이기 순)
+      const x0 = left + start + ctx.measureText(part).width / 2;
+      const xs = x0 - l.st.shear * y;
+      words.push({
+        text: part,
+        x: (l.cx + xs * Math.cos(rad) - y * Math.sin(rad)) / W,
+        y: (l.cy + xs * Math.sin(rad) + y * Math.cos(rad)) / H,
+        size: l.size / W / s.scale,
+      });
+    }
+  });
+  return { ...s, words };
 }
 
 /** 추천받은 문구를 결과 화면에서 다시 고를 수 있게 이 브라우저 탭에만 보관 (생성 id별) */

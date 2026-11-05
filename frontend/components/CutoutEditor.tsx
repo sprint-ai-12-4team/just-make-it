@@ -4,7 +4,7 @@ import { StickyPreview, type Slide } from "@/components/StickyPreview";
 import { Chip, Notice } from "@/components/ui";
 import { compose, cutOf, FILLS, floodFill, HOME, pixelsOf, placeMatrix, removeBackground, type Place } from "@/lib/cutout";
 import { loadImage } from "@/lib/draw";
-import { drawText, loadFont, TEXT_STYLES, type TextState } from "@/lib/textStyles";
+import { drawText, loadFonts, type TextState } from "@/lib/textStyles";
 import { Check, Eraser, FlipHorizontal2, FlipVertical2, Loader2, Move, Paintbrush, RotateCcw, Sparkles, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -68,9 +68,7 @@ export function CutoutEditor({ photoUrl, name, onDone, onCancel, cancelLabel = "
     let alive = true;
     const bg = document.createElement("canvas");
     compose(bg, cut, fill, place);
-    loadFont(TEXT_STYLES.find((s) => s.id === text.style) ?? TEXT_STYLES[0])
-      .catch(() => {})
-      .then(() => alive && drawText(canvas, bg, text));
+    loadFonts(text).then(() => alive && drawText(canvas, bg, text));
     return () => {
       alive = false;
     };

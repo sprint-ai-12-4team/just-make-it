@@ -15,6 +15,7 @@ export interface GenerateInput {
   image_model: ImageModel;
   keep_product?: boolean; // 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장)
   consult_id?: string; // AI 상담에서 넘어왔으면 (api_spec_consult 3-4). 모르는 서버는 무시함
+  reference_source?: "upload" | "stock"; // 참고 사진 출처 (api_spec_next2 2-2). 사진 없으면 안 보냄
 }
 
 export type TextPosition = "top" | "middle" | "bottom";

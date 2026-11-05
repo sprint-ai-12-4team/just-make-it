@@ -12,7 +12,7 @@ import { api, ApiError } from "@/lib/api";
 import { canvasOf, placeOnScene } from "@/lib/cutout";
 import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
-import { drawText, loadCopies, loadFont, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
+import { drawText, FONTS, joinWords, loadCopies, loadFonts, POSITION_Y, saveCopies, splitWords, styleFor, TEXT_STYLES, type TextState, type WordState } from "@/lib/textStyles";
 import { ADJUSTMENTS, type Brief, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
 import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
@@ -48,7 +48,7 @@ async function composeScene(g: Generation) {
   const [scene, product] = await Promise.all([loadImage(g.background_url!), loadImage(g.product_url!)]);
   const bg = placeOnScene(scene, product);
   const text = textOf(g);
-  await loadFont(TEXT_STYLES.find((s) => s.id === text.style) ?? TEXT_STYLES[0]).catch(() => {});
+  await loadFonts(text);
   const out = canvasOf(bg.width, bg.height);
   drawText(out, bg, text);
   return { bg, out, text };
@@ -69,6 +69,7 @@ function ResultPage() {
   const [g, setG] = useState<Generation | null>(null);
   // null이면 서버가 얹은 image_url 그대로. 값이 있으면 background_url 위에 직접 얹는 중
   const [edit, setEdit] = useState<TextState | null>(null);
+  const [word, setWord] = useState<number | null>(null); // 단어별 편집 중 고른 단어
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -288,7 +289,7 @@ function ResultPage() {
               node: (
                 // w-fit: 가려지는 곳 표시(%)가 그림 크기에 맞게
                 <div className="relative mx-auto w-fit">
-                  {edit && g.background_url ? <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} /> : original.node}
+                  {edit && g.background_url ? <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} selected={word} onSelect={setWord} /> : original.node}
                   {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
                   {showCovered &&
                     covered?.boxes.map((b, i) => (
@@ -352,7 +353,15 @@ function ResultPage() {
           {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
           {g.background_url &&
             (edit ? (
-              <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
+              <TextEditor
+                state={edit}
+                copies={copies}
+                selected={word}
+                onSelect={setWord}
+                onChange={setEdit}
+                onSplit={() => canvasRef.current && (setEdit(splitWords(canvasRef.current.width, canvasRef.current.height, edit)), setWord(null))}
+                onReset={() => (setEdit(null), setWord(null))}
+              />
             ) : (
               <button type="button" className="btn-line" onClick={() => (startEdit(g), api.logEvent(g.id, "edit_text"))}>
                 <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
@@ -438,48 +447,144 @@ function ResultPage() {
 interface EditorProps {
   state: TextState;
   copies: string[];
+  selected: number | null;
+  onSelect: (i: number | null) => void;
   onChange: (s: TextState) => void;
+  onSplit: () => void;
   onReset: () => void;
 }
 
-/** 문구·스타일·크기. 위치는 미리보기에서 끌어서 (또는 방향키) */
-function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
+/** 스타일(효과)·글꼴·색·크기 고르기. 전체용과 단어용이 같이 씀 */
+function Look({ id, style, font, color, scale, range, onPatch }: {
+  id: string;
+  style: string;
+  font?: string;
+  color?: string;
+  scale: number;
+  range: [number, number];
+  onPatch: (p: { style?: string; font?: string; color?: string; scale?: number }) => void;
+}) {
+  const st = TEXT_STYLES.find((s) => s.id === style) ?? TEXT_STYLES[0];
   return (
-    <section className="card flex flex-col gap-6">
-      <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
-      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
-      <div>
-        <label htmlFor="t" className="label">
-          문구
-        </label>
-        <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
-        <RiskyWords text={state.text} />
-        {copies.length > 0 && (
-          <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
-            {copies.map((c) => (
-              <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>
-                {c}
-              </Chip>
-            ))}
-          </div>
-        )}
-      </div>
+    <>
       <fieldset>
-        <legend className="label">글자 스타일</legend>
+        <legend className="label">글자 스타일 (글꼴·색·테두리·그림자 묶음)</legend>
         <div className="flex flex-wrap gap-2">
           {TEXT_STYLES.map((s) => (
-            <Chip key={s.id} on={state.style === s.id} onClick={() => onChange({ ...state, style: s.id })}>
+            <Chip key={s.id} on={style === s.id} onClick={() => onPatch({ style: s.id, font: undefined, color: undefined })}>
               <span style={{ fontFamily: `"${s.font}"` }}>{s.name}</span>
             </Chip>
           ))}
         </div>
       </fieldset>
+      <fieldset>
+        <legend className="label">글꼴</legend>
+        <div className="flex flex-wrap gap-2">
+          {FONTS.map((f) => (
+            <Chip key={f.id} on={(font ?? st.font) === f.id} onClick={() => onPatch({ font: f.id })}>
+              <span style={{ fontFamily: `"${f.id}"` }}>{f.name}</span>
+            </Chip>
+          ))}
+        </div>
+      </fieldset>
+      <div className="flex flex-wrap items-center gap-3">
+        <label htmlFor={`${id}-color`} className="label mb-0">
+          글자 색
+        </label>
+        <input id={`${id}-color`} type="color" value={color ?? "#ffffff"} onChange={(e) => onPatch({ color: e.target.value })} className="h-11 w-16 cursor-pointer rounded-btn border-2 border-mist" />
+        {color && (
+          <button type="button" className="btn-line min-h-[44px] px-4" onClick={() => onPatch({ color: undefined })}>
+            스타일 색으로
+          </button>
+        )}
+      </div>
       <div>
-        <label htmlFor="size" className="label">
+        <label htmlFor={`${id}-size`} className="label">
           글자 크기
         </label>
-        <input id="size" type="range" min={0.6} max={1.6} step={0.05} value={state.scale} onChange={(e) => onChange({ ...state, scale: Number(e.target.value) })} className="w-full accent-ink" />
+        <input id={`${id}-size`} type="range" min={range[0]} max={range[1]} step={0.05} value={scale} onChange={(e) => onPatch({ scale: Number(e.target.value) })} className="w-full accent-ink" />
       </div>
+    </>
+  );
+}
+
+/** 문구·스타일·글꼴·색·크기. 위치는 미리보기에서 끌어서 (또는 방향키). 단어별로 나누면 단어마다 따로 */
+function TextEditor({ state, copies, selected, onSelect, onChange, onSplit, onReset }: EditorProps) {
+  const words = state.words;
+  const w = words && selected !== null ? words[selected] : null;
+  const setWords = (next: WordState[]) => onChange({ ...state, words: next, text: joinWords(next) });
+  const patchWord = (p: Partial<WordState>) => words && selected !== null && setWords(words.map((x, i) => (i === selected ? { ...x, ...p } : x)));
+  // 전체에 한꺼번에: 단어마다 따로 고친 같은 항목은 지움 (크기는 단어 크기에 곱함)
+  const patchAll = (p: Partial<TextState>) => {
+    const clear = Object.keys(p).filter((k) => k !== "scale");
+    onChange({ ...state, ...p, words: words?.map((x) => ({ ...x, ...Object.fromEntries(clear.map((k) => [k, undefined])) })) });
+  };
+
+  return (
+    <section className="card flex flex-col gap-6">
+      <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
+      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
+
+      <div className="grid grid-cols-2 gap-2" role="group" aria-label="고치는 방법">
+        <button type="button" aria-pressed={!words} className={!words ? "btn-fill" : "btn-line"} onClick={() => words && (onChange({ ...state, words: undefined }), onSelect(null))}>
+          문구 전체
+        </button>
+        <button type="button" aria-pressed={!!words} className={words ? "btn-fill" : "btn-line"} onClick={() => !words && onSplit()}>
+          단어별로
+        </button>
+      </div>
+
+      {!words ? (
+        <div>
+          <label htmlFor="t" className="label">
+            문구
+          </label>
+          <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
+          <RiskyWords text={state.text} />
+          {copies.length > 0 && (
+            <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
+              {copies.map((c) => (
+                <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>
+                  {c}
+                </Chip>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <p className="hint">고칠 단어를 고르세요. 위 이미지에서 단어를 눌러도 돼요. 빈 곳을 끌면 전체가 같이 움직여요.</p>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="단어 고르기">
+            {words.map((x, i) => (
+              <Chip key={i} on={selected === i} onClick={() => onSelect(selected === i ? null : i)}>
+                {x.text || "(빈 단어)"}
+              </Chip>
+            ))}
+          </div>
+          <RiskyWords text={state.text} />
+        </div>
+      )}
+
+      {w && (
+        <div className="flex flex-col gap-6 rounded-card border-2 border-ink p-5">
+          <h3 className="font-bold">‘{w.text}’만 고치기</h3>
+          <div>
+            <label htmlFor="w-text" className="label">
+              단어
+            </label>
+            <input id="w-text" className="field" value={w.text} onChange={(e) => patchWord({ text: e.target.value })} />
+            <p className="mt-2 hint">지우면 이 단어가 빠져요.</p>
+          </div>
+          <Look id="w" style={w.style ?? state.style} font={w.font ?? state.font} color={w.color ?? state.color} scale={w.scale ?? 1} range={[0.4, 2.5]} onPatch={patchWord} />
+          <button type="button" className="btn-line" onClick={() => patchWord({ style: undefined, font: undefined, color: undefined, scale: undefined })}>
+            <Undo2 aria-hidden className="size-5" /> 이 단어 모양을 전체와 같게
+          </button>
+        </div>
+      )}
+
+      {words && <h3 className="-mb-2 font-bold">전체에 한꺼번에</h3>}
+      <Look id="all" style={state.style} font={state.font} color={state.color} scale={state.scale} range={[0.6, 1.6]} onPatch={patchAll} />
+
       <button type="button" className="btn-line" onClick={onReset}>
         <Undo2 aria-hidden className="size-5" /> 처음 이미지로 돌아가기
       </button>

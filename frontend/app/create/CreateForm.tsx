@@ -7,13 +7,21 @@ import { shrinkPhoto } from "@/lib/draw";
 import { saveCopies } from "@/lib/textStyles";
 import { IMAGE_MODELS, STYLES, TEXT_MODELS, type ImageModel, type Purpose, type TextModel } from "@/lib/types";
 import clsx from "clsx";
-import { ChevronLeft, ImagePlus, MessageCircle, Scissors, Sparkles, X } from "lucide-react";
+import { ChevronLeft, ImagePlus, Loader2, MessageCircle, Scissors, Search, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const PHOTO_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const MAX_PHOTO = 10 * 1024 * 1024;
+
+/** app/api/pixabay 응답. 사진을 안 올렸을 때 참고 사진 후보 */
+interface Stock {
+  id: number;
+  thumb: string;
+  page: string;
+  user: string;
+}
 
 export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: { purpose: Purpose; purposeTitle: string; consultId?: string; copyIndex?: number }) {
   const router = useRouter();
@@ -25,6 +33,11 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [photoError, setPhotoError] = useState("");
+  // 사진이 없을 때 "비슷한 사진 찾아보기"로 Pixabay 후보. null = 아직 안 찾음
+  const [searching, setSearching] = useState(false);
+  const [stock, setStock] = useState<Stock[] | null>(null);
+  const [stockPick, setStockPick] = useState<Stock | null>(null);
+  const [stockBusy, setStockBusy] = useState(0); // 받는 중인 사진 id
   const [cutout, setCutout] = useState(false);
   const [keepProduct, setKeepProduct] = useState(false); // 배경 지운 상품 + AI 장면 (api_spec_next 4장)
   const [detail, setDetail] = useState(false);
@@ -69,12 +82,37 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
     setKeepProduct(scene);
   }
 
+  async function findStock() {
+    setSearching(true);
+    // 못 불러와도 직접 올리기 안내는 그대로 보임
+    const r = await fetch(`/api/pixabay?q=${encodeURIComponent(name.trim())}`).then((r) => r.json(), () => null);
+    setStock(r?.hits ?? []);
+    setSearching(false);
+  }
+
+  async function pickStock(s: Stock) {
+    setStockBusy(s.id);
+    setPhotoError("");
+    try {
+      const res = await fetch(`/api/pixabay?id=${s.id}`);
+      if (!res.ok) throw new Error();
+      const blob = await res.blob();
+      await pickPhoto(new File([blob], `pixabay-${s.id}.jpg`, { type: blob.type || "image/jpeg" }));
+      setStockPick(s);
+    } catch {
+      setPhotoError("사진을 받지 못했어요. 다른 사진을 골라 주세요.");
+    } finally {
+      setStockBusy(0);
+    }
+  }
+
   function removePhoto() {
     URL.revokeObjectURL(photoUrl);
     setPhotoUrl("");
     setCutout(false);
     setKeepProduct(false);
     setPhoto(null);
+    setStockPick(null);
   }
 
   async function suggest() {
@@ -103,7 +141,7 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
         router.push(`/detail/${id}`);
       } else {
         const gid = await api.startGeneration(
-          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel, ...(keepProduct && { keep_product: true }), ...(fromConsult && { consult_id: consultId }) },
+          { purpose, product_name: name.trim(), message: message.trim(), style, adjustments: [], parent_id: null, image_model: imageModel, ...(keepProduct && { keep_product: true }), ...(fromConsult && { consult_id: consultId }), ...(photo && { reference_source: stockPick ? "stock" : "upload" }) },
           photo,
         );
         saveCopies(gid, copies);
@@ -186,7 +224,7 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
 
       <div>
         <label htmlFor="name" className="label">가게 또는 상품 이름</label>
-        <input id="name" className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 동네꽃집, 수제 딸기잼" aria-invalid={tried && !name.trim()} aria-describedby="name-err" />
+        <input id="name" className="field" value={name} onChange={(e) => (setName(e.target.value), setStock(null))} placeholder="예: 동네꽃집, 수제 딸기잼" aria-invalid={tried && !name.trim()} aria-describedby="name-err" />
         {tried && !name.trim() && <FieldError id="name-err">이름을 적어 주세요.</FieldError>}
       </div>
 
@@ -235,17 +273,22 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
       </fieldset>
 
       <div>
-        <span className="label">상품 사진 (선택)</span>
-        <p className="mb-3 hint">사진이 있으면 상품을 더 비슷하게 만들어요. PNG·JPG·WEBP, 10MB까지.</p>
+        <span className="label">참고할 사진 (추천)</span>
+        <p className="mb-3 hint">상품이나 가게 사진을 올려 주시면 생각하신 모습에 훨씬 가깝게 만들어 드려요. PNG·JPG·WEBP, 10MB까지.</p>
         {photo && cutout ? (
-          <CutoutEditor photoUrl={photoUrl} name={photo.name} scene={!detail} onDone={pickPhoto} onCancel={() => setCutout(false)} />
+          <CutoutEditor photoUrl={photoUrl} name={photo.name} scene={!detail && !stockPick} onDone={pickPhoto} onCancel={() => setCutout(false)} />
         ) : photo ? (
           <div className="flex flex-col gap-3 rounded-btn bg-mist p-3">
             <div className="flex items-center gap-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={photoUrl} alt="올린 상품 사진" className="size-20 rounded-sm object-cover" />
+              <img src={photoUrl} alt="올린 사진" className="size-20 rounded-sm object-cover" />
               <span className="flex-1 truncate">
-                {photo.name}
+                {stockPick ? "고른 참고 사진" : photo.name}
+                {stockPick && (
+                  <a href={stockPick.page} target="_blank" rel="noreferrer" className="block hint underline">
+                    사진: {stockPick.user} / Pixabay
+                  </a>
+                )}
                 {keepProduct && <span className="block hint">상품 그대로, 배경은 AI가 그려요</span>}
               </span>
               <button type="button" onClick={removePhoto} className="btn-line min-h-[44px] px-4" aria-label="사진 빼기">
@@ -257,11 +300,46 @@ export function CreateForm({ purpose, purposeTitle, consultId, copyIndex = 0 }: 
             </button>
           </div>
         ) : (
-          <label className="flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border-2 border-dashed border-charcoal hover:bg-mist">
-            <ImagePlus aria-hidden className="size-8" />
-            <span className="font-medium">사진 고르기</span>
-            <input type="file" accept={PHOTO_TYPES.join(",")} className="sr-only" onChange={(e) => pickPhoto(e.target.files?.[0])} />
-          </label>
+          <>
+            <p className="mb-3 rounded-btn bg-pollen p-4">사진 없이도 만들 수 있지만, 생각하신 모습과 조금 다르게 나올 수 있어요. 휴대폰으로 찍은 사진이면 충분해요.</p>
+            <label className="flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border-2 border-dashed border-charcoal hover:bg-mist">
+              <ImagePlus aria-hidden className="size-8" />
+              <span className="font-medium">사진 고르기</span>
+              <input type="file" accept={PHOTO_TYPES.join(",")} className="sr-only" onChange={(e) => pickPhoto(e.target.files?.[0])} />
+            </label>
+            {stock === null ? (
+              <button type="button" className="btn-line mt-3 w-full" disabled={!name.trim() || searching} onClick={findStock}>
+                {searching ? <Loader2 aria-hidden className="size-5 animate-spin" /> : <Search aria-hidden className="size-5" />}
+                {searching ? "비슷한 사진을 찾고 있어요…" : "올릴 사진이 없으면 비슷한 사진 찾아보기"}
+              </button>
+            ) : null}
+            {stock === null && !name.trim() ? (
+              <p className="mt-2 hint">위에 가게 또는 상품 이름을 적으면 찾아볼 수 있어요.</p>
+            ) : stock === null ? null : (
+              <div className="mt-4 flex flex-col gap-3">
+                {stock.length > 0 ? (
+                  <>
+                    <p className="font-medium">‘{name.trim()}’ 비슷한 사진이에요. 누르면 참고 사진으로 써요.</p>
+                    <ul className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-label="참고 사진 후보">
+                      {stock.map((s) => (
+                        <li key={s.id}>
+                          <button type="button" disabled={!!stockBusy} onClick={() => pickStock(s)} className="relative block w-full overflow-hidden rounded-btn border-2 border-mist hover:border-ink">
+                            {/* eslint-disable-next-line @next/next/no-img-element -- Pixabay 검색 결과 미리보기 */}
+                            <img src={s.thumb} alt={`참고 사진 후보 (${s.user})`} className="block aspect-square w-full object-cover" />
+                            {stockBusy === s.id && <Loader2 aria-label="받는 중" className="absolute inset-0 m-auto size-8 animate-spin text-white" />}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-caption text-graphite">사진 제공: Pixabay</p>
+                    <p className="hint">마음에 드는 사진이 없으면 원하시는 사진을 위에서 직접 올려 주세요.</p>
+                  </>
+                ) : (
+                  <p className="hint">비슷한 사진을 찾지 못했어요. 원하시는 사진을 위에서 직접 올려 주세요.</p>
+                )}
+              </div>
+            )}
+          </>
         )}
         {photoError && <FieldError>{photoError}</FieldError>}
       </div>
