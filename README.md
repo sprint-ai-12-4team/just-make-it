@@ -1,7 +1,7 @@
 ![소셜 프리뷰](https://repository-images.githubusercontent.com/1420090534/f4e71eab-df1f-495f-9042-c83ecb2b184c)
 # JUST MAKE IT - AI 광고 이미지 생성 서비스
 > **"Just Make It" 팀의 하이브리드 AI 이미지 생성 및 서빙 플랫폼 프로젝트입니다.**  
-> 본 프로젝트는 GCP L4 GPU 환경의 가성비와 OpenAI API의 안정성을 결합하여 대규모 트래픽(MAU) 대응이 가능한 이미지 생성 아키텍처를 구축합니다.
+> 본 프로젝트는 GCP L4 GPU 환경의 가성비와 OpenAI API의 안정성을 결합하여 대규모 트래픽(MAU) 대응이 가능한 광고 이미지 생성 아키텍처를 구축합니다.
 
 ---
 
@@ -9,7 +9,7 @@
 
 우리의 목표는 **비용 최적화**와 **무중단 서비스 보장**을 동시에 달성하는 것입니다.
 
-*   **기본 라우팅 (로컬 L4 GPU):** 일반적인 이미지 생성 요청은 자체 서빙 모델(FLUX.2 klein-4B 등)로 처리하여 비용을 `0원`으로 수렴시킵니다.
+*   **기본 라우팅 (로컬 L4 GPU):** 일반적인 이미지 생성 요청은 자체 서빙 모델(FLUX.2 klein-4B)로 처리하여 비용을 `0원`으로 수렴시킵니다.
 *   **우회 라우팅 (OpenAI Fallback):** 로컬 GPU 대기 큐(Queue)가 가득 차거나 프리미엄 기능을 요청할 경우, `OpenAI Image 2.5 API`로 요청을 즉시 우회하여 유저 대기 시간을 최소화합니다.
 
 ⚠️ **하드웨어 제약 조건:** GCP g2-standard-4 인스턴스는 **시스템 RAM이 16GB**로 매우 제한적입니다. 모든 파트는 메모리 누수 방지 및 최적화 설정을 최우선으로 고려해야 합니다.
@@ -19,22 +19,37 @@
 ## 팀원 역할 및 작업 영역 (Role & Responsibilities)
 
 프로젝트 코드는 각 담당자의 역할에 따라 `src/just_make_it/` 하위 폴더로 격리되어 관리됩니다.
-
-### 1. 📋 PM: 최중열 (Project Manager)
+![팀원 소개](https://pub-8fa6ea20a6f049ae905264115fec3cbd.r2.dev/test/just-make-it-team-4.jpg)
+### 1. 📋 PM: 최중열 (Project Manager) [Notion 작업일지](https://app.notion.com/p/3fac4fa90261807fae50c8ebc774a030)
 *   **담당 영역:** `README.md`, `docs/`, `CLAUDE.md` (기획안 및 API 스펙 관리)
 *   **핵심 미션:** 제품 스펙 정의, 기능 요구사항 구체화, API 엔드포인트 명세 조율.
 
-### 2. 🧠 모델 개발: 안찬형 (Model Engineer)
+### 2. 🧠 모델 개발: 안찬형 (Model Engineer) [Notion 작업일지](https://app.notion.com/p/3fe0c998e37f80b58e1af6165cba6c1a?pvs=25)
 *   **담당 영역:** `src/just_make_it/core/`
-*   **핵심 미션:** RAM 16GB 환경에서 구동 가능한 경량/가속 이미지 생성 파이프라인(FLUX.2 klein-4B, gemma4-12B-it) 구축, FP16 양자화 및 VRAM 캐시 최적화.
+*   **핵심 미션:** RAM 16GB/VRAM 24GB 환경에서 구동 가능한 경량/가속 이미지 생성 파이프라인(FLUX.2 klein-4B, gemma4-12B-it) 구축, FP16 양자화 및 VRAM 캐시 최적화, 프롬프트 finetuning으로 사용자 요청에 근접한 이미지 생성.
 
-### 3. 🌐 서빙 엔지니어: 장한빈 (Serving Engineer)
+### 3. 🌐 서빙 엔지니어: 장한빈 (Serving Engineer) [Notion 작업일지](https://app.notion.com/p/3fb03a6fc0d280df8873f294a0df02cc?source=copy_link)
 *   **담당 영역:** `src/just_make_it/serving/`, `Dockerfile`, `docker-compose.yml`
 *   **핵심 미션:** FastAPI 기반 인프라 구축, **동시성 제어를 위한 단일 워커(--workers 1)** 세팅, 로컬 GPU 상태 모니터링을 통한 OpenAI 비동기 분기 로직(`queue_manager.py`) 구현, 컨테이너 환경 관리.
 
 ### 4. 🛠️ 서비스 개발: 최중열 (Fullstack Developer)
 *   **담당 영역:** `src/just_make_it/service/`
-*   **핵심 미션:** 비즈니스 로직 구현, 유저 인증 및 프리미엄 모드 판별, 생성 기록(SQLite)과 이미지를 VM 로컬 디스크에 저장하고 영구 URL 발급.
+*   **핵심 미션:** 비즈니스 로직 구현, 프리미엄 모드 판별, 생성 기록(SQLite)과 이미지를 VM 로컬 디스크에 저장하고 영구 URL 발급.
+
+---
+
+## 시연 페이지
+
+프로젝트 기간에만 일시적으로 운영되는 페이지입니다. 아래 링크를 따라가세요.
+
+[🍩 JUST-MAKE-IT Web UI](https://just-make-it-ten.vercel.app)
+
+---
+
+## 보고서 PDF
+
+Codeit LMS에 별도 파일로 제출합니다.
+
 
 ---
 
@@ -114,11 +129,12 @@ npm run dev
 ## 🤝 협업 가이드 (Git Branch Strategy)
 
 *   `main`: 프로덕션 배포 브랜치 (직접 푸시 절대 금지)
+*   `dev`: 각 파트 통합 테스트 브랜치(PR은 이 브랜치에서만)
 *   `feature/{role}-{기능명}`: 각 파트별 작업 브랜치
     *   예: `feature/model-sdxl-lightning`
     *   예: `feature/serving-fallback-logic`
     *   예: `feature/service-gcs-upload`
-*   **Code Review:** 모든 PR은 담당 파트 외 1명 이상의 리뷰와 승인(Approve)을 거쳐 `main`에 머지됩니다.
+*   **Code Review:** 모든 PR은 담당 파트 외 2명 이상의 리뷰와 승인(Approve)을 거쳐 `main`에 머지됩니다.
 
 ---
 
