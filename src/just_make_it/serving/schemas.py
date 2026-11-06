@@ -17,6 +17,8 @@ Route = Literal["primary", "fallback", "premium"]
 # 프론트가 고르는 모델 (api_spec 1·3장). 화면에는 "빠르게 / 더 정교하게"로만 보인다
 ImageModel = Literal["flux2-klein-4b", "openai-image-2.5-flare"]
 TextModel = Literal["gemma-4-12b-it", "openai-gpt-5.6-luna"]
+# 참고 사진 출처: upload 직접 올림 · stock 프론트가 보여 준 Pixabay 후보에서 고름 (정량평가용)
+ReferenceSource = Literal["upload", "stock"]
 # 글자 고치기 값 (api_spec 5장 text_layout). core text_overlay의 POSITIONS·FONTS와 같다
 TextPosition = Literal["top", "middle", "bottom"]
 FontId = Literal["jua", "yeonsung", "batang", "dodum", "blackhan"]
@@ -69,6 +71,8 @@ class GenerateRequest(BaseModel):
     consult_id: str | None = Field(default=None, max_length=64)
     # 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장). 배경을 지운 PNG·WEBP가 필요
     keep_product: bool = False
+    # 참고 사진 출처 (정량평가용): upload 직접 올림 · stock Pixabay에서 고름. 사진이 없으면 저장하지 않음
+    reference_source: ReferenceSource | None = None
 
     _strip = field_validator("product_name", "message", "style", mode="before")(
         _strip_text
@@ -139,6 +143,8 @@ class GenerationInput(BaseModel):
     adjustments: list[str] = Field(default_factory=list)
     consult_id: str | None = None
     keep_product: bool = False
+    # 참고 사진 출처: upload · stock · None(사진 없음, 예전 결과)
+    reference_source: ReferenceSource | None = None
 
 
 class GenerationProgress(BaseModel):
@@ -236,6 +242,14 @@ class EventRequest(BaseModel):
     detail: dict | None = None
 
 
+class ReferenceStats(BaseModel):
+    """참고 사진 출처별 (upload · stock · none). generated가 0이면 비율은 None."""
+
+    generated: int
+    download_rate: float | None
+    remake_rate: float | None
+
+
 class DailyStats(BaseModel):
     date: str
     generated: int
@@ -245,6 +259,14 @@ class DailyStats(BaseModel):
     download_rate: float
     edit_rate: float
     remake_rate: float
+    # 정량평가 칸 (11-04 요청). mock 결과 제외, 계산할 결과가 없으면 None
+    seconds_p50: float | None = None  # 생성 시간(대기 포함) 중앙값
+    seconds_p95: float | None = None
+    local_rate: float | None = None  # 로컬 GPU로 만든 비율 (성공 중)
+    cost_usd: float | None = None  # OpenAI 비용 합 (성공·실패 모두)
+    cost_per_image_usd: float | None = None  # cost_usd / 성공 수
+    error_rate: float | None = None  # 실패 / (성공 + 실패)
+    by_reference: dict[str, ReferenceStats] | None = None
 
 
 class StatsResponse(BaseModel):
@@ -373,6 +395,8 @@ class GenerationSpec:
     consult_id: str | None = None
     # 상품 없는 장면만 그림. reference_image는 상품(투명 PNG)으로 저장만 하고 모델에는 넣지 않음
     keep_product: bool = False
+    # 참고 사진 출처 (기록용, upload · stock). 사진이 없으면 None
+    reference_source: str | None = None
     # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
     # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
     output: Literal["combined", "image"] = "combined"
@@ -443,6 +467,27 @@ class ConsultStartRequest(BaseModel):
 
 
 CONSULT_TEXT_MAX = 500
+
+
+class AdviceRequest(BaseModel):
+    """POST /advice. advice_id가 없으면 새 대화. consult_id가 있으면 그 상담 기획서를 참고."""
+
+    advice_id: str | None = Field(default=None, max_length=64)
+    text: str
+    consult_id: str | None = Field(default=None, max_length=64)
+
+
+class AdviceResponse(BaseModel):
+    advice_id: str
+    reply: str
+    chips: list[str] = Field(default_factory=list)
+    # true면 프론트가 "이미지 만들러 가기" 버튼을 보여 줌
+    go_create: bool = False
+    ended: bool = False
+    turn: int
+    max_turns: int
+    # 이번 턴에 부른 모델: openai / local
+    source: Literal["openai", "local"] | None = None
 
 
 class ConsultMessageRequest(BaseModel):

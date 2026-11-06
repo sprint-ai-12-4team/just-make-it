@@ -59,6 +59,10 @@ class ServingSettings(BaseSettings):
     # 상담 1회 최대 턴: 질문 7 + 기획서 수정 2 + 주제 밖 되돌림 여유
     consult_max_turns: int = 12
     convert_daily_limit: int = 20  # client당 하루 문구 변환 수
+    # AI 광고 조언 자유 대화 (POST /advice). 상담과 같은 규칙, 따로 셈
+    advice_daily_limit: int = 3  # client당 하루 새 대화 수
+    advice_ip_daily_limit: int = 10  # IP당 하루 새 대화 수
+    advice_max_turns: int = 12  # 대화 1개에서 사장님이 보낼 수 있는 글 수
     # 하루 OpenAI 상한 중 상담·변환(텍스트)에 쓸 수 있는 비율. 넘으면 로컬 Gemma로
     consult_budget_share: float = 0.33
     # 상담·변환 한 번의 제한 시간(초)

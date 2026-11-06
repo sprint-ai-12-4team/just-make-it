@@ -125,7 +125,7 @@ CREATE INDEX IF NOT EXISTS idx_text_calls_day
 -- events는 결과(generation_id)가 있어야 해서, 결과가 없는 상담 단계는 여기에 남김
 CREATE TABLE IF NOT EXISTS flags (
     id            INTEGER PRIMARY KEY,
-    reason        TEXT NOT NULL,                    -- moderation, off_topic
+    reason        TEXT NOT NULL,                    -- moderation, off_topic, advice_moderation, advice_off_topic
     client_id     TEXT NOT NULL,
     ip            TEXT,
     consult_id    TEXT REFERENCES consults(id),
@@ -134,3 +134,19 @@ CREATE TABLE IF NOT EXISTS flags (
 
 CREATE INDEX IF NOT EXISTS idx_flags_client
     ON flags (client_id, created_at);
+
+-- [추가] AI 광고 조언 자유 대화 (POST /advice). 대화 기록을 서버가 들고 있다가 core advisor에 넘김
+CREATE TABLE IF NOT EXISTS advices (
+    id            TEXT PRIMARY KEY,                 -- "a_" + uuid hex
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    consult_id    TEXT,                             -- 상담 기획서를 context로 쓰면 그 상담 id
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    messages_json TEXT NOT NULL CHECK (json_valid(messages_json)),  -- [{role, text, chips?}]
+    turn          INTEGER NOT NULL DEFAULT 0,       -- 사장님이 보낸 글 수
+    off_topic     INTEGER NOT NULL DEFAULT 0,       -- 연속 주제 밖 수 (3이면 끝)
+    ended         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_advices_client
+    ON advices (client_id, created_at);

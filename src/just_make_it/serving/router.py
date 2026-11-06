@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
 from .assistant import (
+    AdviceEndedError,
+    AdviceNotFoundError,
     AssistantService,
     ConsultEndedError,
     ConsultNotFoundError,
@@ -37,6 +39,8 @@ from .schemas import (
     CONVERT_TEXT_MAX,
     IMAGE_QUALITY,
     TEXT_QUALITY,
+    AdviceRequest,
+    AdviceResponse,
     ConsultMessageRequest,
     ConsultResponse,
     ConsultStartRequest,
@@ -338,7 +342,9 @@ async def _submit_generation(request: Request, x_client_id: str | None):
     body, reference = await _parse_form_body(request, settings)
     payload = _validate(GenerateRequest, body)
     _check_lengths(payload, settings)
+    uploaded = reference is not None
     reference = await _product_photo(request, payload, reference)
+    source = await _reference_source(request, payload, uploaded)
 
     manager = _manager(request)
     spec = GenerationSpec(
@@ -350,6 +356,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         reference_image=reference,
         consult_id=payload.consult_id,
         keep_product=payload.keep_product,
+        reference_source=source,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
@@ -369,6 +376,22 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         raise HTTPException(status_code=503, detail=MSG_BUSY) from exc
     except DailyLimitError as exc:
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+
+
+async def _reference_source(
+    request: Request, payload: GenerateRequest, uploaded: bool
+) -> str | None:
+    """참고 사진 출처 (정량평가용). 이번에 사진을 올렸으면 보낸 값, 사진 없이 `upload`·`stock`이면 None.
+
+    다시 만들기(`parent_id`)에서 사진을 안 보내면 원본 사진을 다시 쓰므로 원본의 값을 이어 씀.
+    """
+    if uploaded:
+        return payload.reference_source
+    if payload.parent_id:
+        return await asyncio.to_thread(
+            _records(request).reference_source, payload.parent_id
+        )
+    return None
 
 
 async def _product_photo(
@@ -501,12 +524,68 @@ async def stats(
     - `generated` 성공한 결과 수, `downloaded` 다운로드·링크 복사된 수,
       `edited` 글자 직접 고치기·배경 지우기를 한 수, `remade` 다시 만들기·조금 수정하기의 원본이 된 수
     - `*_rate`는 generated 대비 비율
+    - 정량평가 칸 (mock 결과 제외, 계산할 결과가 없으면 null): `seconds_p50`·`seconds_p95` 생성 시간
+      (대기+문구+이미지), `local_rate` 로컬 GPU 비율, `cost_usd` OpenAI 비용 합, `cost_per_image_usd`,
+      `error_rate` 실패 / (성공+실패), `by_reference` 참고 사진 출처별(upload·stock·none)
+      `{generated, download_rate, remake_rate}`
     """
-    rows = await asyncio.to_thread(_records(request).adoption_stats, days)
-    daily = [_with_rates(row["day"], row) for row in rows]
+    records = _records(request)
+    rows = await asyncio.to_thread(records.adoption_stats, days)
+    evals = await asyncio.to_thread(records.eval_rows, days)
+    daily = [
+        {
+            **_with_rates(row["day"], row),
+            **_eval_fields([e for e in evals if e["day"] == row["day"]]),
+        }
+        for row in rows
+    ]
     keys = ("generated", "downloaded", "edited", "remade")
-    total = _with_rates("total", {k: sum(row[k] for row in rows) for k in keys})
+    total = {
+        **_with_rates("total", {k: sum(row[k] for row in rows) for k in keys}),
+        **_eval_fields(evals),
+    }
     return StatsResponse(days=daily, total=total)
+
+
+REFERENCE_KEYS = ("upload", "stock", "none")
+
+
+def _eval_fields(rows: list[dict]) -> dict:
+    """정량평가 칸 (api_spec "/stats 정량평가 추가 칸"). rows는 records.eval_rows (mock 제외)."""
+    done = [r for r in rows if r["status"] == "success"]
+    seconds = sorted(r["seconds"] for r in done if r["timed"])
+    cost = sum(r["cost_usd"] or 0.0 for r in rows)
+
+    def ratio(part: int, whole: int) -> float | None:
+        return round(part / whole, 3) if whole else None
+
+    by_reference = {}
+    for key in REFERENCE_KEYS:
+        mine = [r for r in done if r["reference"] == key]
+        by_reference[key] = {
+            "generated": len(mine),
+            "download_rate": ratio(sum(bool(r["downloaded"]) for r in mine), len(mine)),
+            "remake_rate": ratio(sum(bool(r["remade"]) for r in mine), len(mine)),
+        }
+    return {
+        "seconds_p50": _percentile(seconds, 0.5),
+        "seconds_p95": _percentile(seconds, 0.95),
+        "local_rate": ratio(sum(r["backend"] == "local" for r in done), len(done)),
+        "cost_usd": round(cost, 4) if rows else None,
+        "cost_per_image_usd": round(cost / len(done), 4) if done else None,
+        "error_rate": ratio(len(rows) - len(done), len(rows)),
+        "by_reference": by_reference,
+    }
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    """정렬된 값의 q 분위수 (선형 보간). 값이 없으면 None."""
+    if not values:
+        return None
+    pos = (len(values) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(values) - 1)
+    return round(values[low] + (values[high] - values[low]) * (pos - low), 1)
 
 
 def _with_rates(day: str, row: dict) -> dict:
@@ -880,6 +959,71 @@ async def get_consult(
     except ConsultNotFoundError as exc:
         raise HTTPException(status_code=404, detail=MSG_CONSULT_NOT_FOUND) from exc
     return ConsultResponse.model_validate(consult)
+
+
+# ---------------------------------------------------------------------- /advice
+MSG_ADVICE_NOT_FOUND = "대화를 찾을 수 없어요. 새로 물어봐 주세요."
+MSG_ADVICE_ENDED = "대화가 끝났어요. 새로 물어보거나 바로 만들기로 이어 갈 수 있어요."
+MSG_ADVICE_LIMIT = "오늘 조언 대화 횟수를 다 썼어요. 바로 만들기는 계속 쓸 수 있어요."
+
+
+@router.post(
+    "/advice",
+    response_model=AdviceResponse,
+    responses={
+        400: {"description": "빈 글, 또는 Moderation에 걸린 글"},
+        404: {"description": "없는 대화 (다른 사람의 대화도 404)"},
+        409: {"description": "끝난 대화 (턴 수를 다 씀, 주제 밖 3번)"},
+        413: {"description": "글이 500자 초과"},
+        429: {"description": "오늘 새 대화 횟수 초과 (client 3회 · IP 10회)"},
+        503: {
+            "description": "모델 응답 없음 (로컬 대체도 실패). 프론트는 기본 안내로 대체"
+        },
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            AdviceRequest,
+            {"advice_id": None, "text": "손님이 동네 주민인데 어디에 올려요?"},
+        )
+    },
+)
+async def advice(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> AdviceResponse:
+    """AI 광고 조언 자유 대화 (core `advisor.advise`, terra). 대화 기록은 서버가 들고 있음.
+
+    - `advice_id`가 없으면 새 대화 (첫 답이 나온 뒤 저장, 모델이 실패하면 횟수도 안 셈)
+    - `consult_id`가 내 상담이면 그 기획서를 참고해서 답함 (남의 상담은 무시)
+    - `go_create: true`면 프론트가 "이미지 만들러 가기"를 보여 줌
+    - 상담과 같은 규칙: 하루 새 대화 수·턴 수(12)·Moderation·주제 밖 3번 연속 종료·텍스트 금액 몫
+    """
+    body = await _read_json(request)
+    if isinstance(body.get("text"), str) and not body["text"].strip():
+        raise HTTPException(status_code=400, detail="물어볼 내용을 적어 주세요.")
+    payload = _validate(AdviceRequest, body)
+    if len(payload.text) > CONSULT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"{CONSULT_TEXT_MAX}자 이하로 적어 주세요."
+        )
+    try:
+        turn = await _assistant(request).advise(
+            payload.advice_id,
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text,
+            payload.consult_id,
+        )
+    except AdviceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_ADVICE_NOT_FOUND) from exc
+    except AdviceEndedError as exc:
+        raise HTTPException(status_code=409, detail=MSG_ADVICE_ENDED) from exc
+    except ModerationError as exc:
+        raise HTTPException(status_code=400, detail=MSG_MODERATION) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_ADVICE_LIMIT) from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return AdviceResponse.model_validate(turn)
 
 
 # ---------------------------------------------------------------------- /copies/convert

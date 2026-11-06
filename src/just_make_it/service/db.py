@@ -9,6 +9,7 @@
   고친 그림 저장: replace_image (api_spec_next 2) / 같은 원본 목록: family (3) / 사용 기록: add_event (1)
   상담: start_consult → get_consult → save_consult / 텍스트 호출 기록: add_text_call, count_text_calls, text_cost_today
   악용 감지: add_flag, count_flags (상담 단계라 events 대신 flags 테이블)
+  광고 조언(자유 대화): start_advice → get_advice → save_advice
 
 ponytail: 로컬 SQLite·디스크는 ms 단위라 동기 함수. 이벤트 루프가 막히면 서빙에서 asyncio.to_thread로 감싸기
 """
@@ -464,7 +465,8 @@ def text_cost_today() -> float:
     return float(_run(f"SELECT SUM(cost_usd) FROM text_calls WHERE created_at >= {_TODAY}")[0][0] or 0)
 
 
-FLAG_REASONS = {"moderation", "off_topic"}
+# advice_*: /advice 대화 (consult_id 없이 남김)
+FLAG_REASONS = {"moderation", "off_topic", "advice_moderation", "advice_off_topic"}
 
 
 def add_flag(reason: str, client_id: str, ip: str | None, *, consult_id: str | None = None) -> None:
@@ -487,3 +489,43 @@ def count_flags(*, client_id: str | None = None, ip: str | None = None) -> int:
         sql += " AND ip=?"
         args.append(ip)
     return _run(sql, tuple(args))[0][0]
+
+
+# ---------- 광고 조언 자유 대화 (POST /advice) ----------
+
+def start_advice(client_id: str, ip: str | None, consult_id: str | None, advice: dict) -> str:
+    """첫 답이 나온 대화를 저장하고 id("a_…")를 돌려줌. advice: messages, turn, off_topic, ended."""
+    aid = "a_" + uuid.uuid4().hex
+    _run(
+        """INSERT INTO advices (id, client_id, ip, consult_id, messages_json, turn, off_topic, ended)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (aid, client_id, ip, consult_id, json.dumps(advice["messages"], ensure_ascii=False),
+         advice["turn"], advice["off_topic"], int(bool(advice["ended"]))),
+    )
+    return aid
+
+
+def get_advice(aid: str) -> dict | None:
+    rows = _run("SELECT * FROM advices WHERE id=?", (aid,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r["id"],
+        "client_id": r["client_id"],
+        "consult_id": r["consult_id"],
+        "created_at": r["created_at"],
+        "messages": json.loads(r["messages_json"]),
+        "turn": r["turn"],
+        "off_topic": r["off_topic"],
+        "ended": bool(r["ended"]),
+    }
+
+
+def save_advice(a: dict) -> None:
+    """get_advice로 받은 dict를 고친 뒤 그대로 저장."""
+    _run(
+        "UPDATE advices SET messages_json=?, turn=?, off_topic=?, ended=? WHERE id=?",
+        (json.dumps(a["messages"], ensure_ascii=False), a["turn"], a["off_topic"],
+         int(bool(a["ended"])), a["id"]),
+    )

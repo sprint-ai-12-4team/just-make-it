@@ -63,6 +63,11 @@ class GenerationRecords:
                 "adjustments": spec.adjustments,
                 **({"consult_id": spec.consult_id} if spec.consult_id else {}),
                 **({"keep_product": True} if spec.keep_product else {}),
+                **(
+                    {"reference_source": spec.reference_source}
+                    if spec.reference_source
+                    else {}
+                ),
             },
             backend=backend,
             model=model,
@@ -218,6 +223,34 @@ class GenerationRecords:
         )
         return [dict(row) for row in rows]
 
+    def eval_rows(self, days: int) -> list[dict]:
+        """정량평가 칸용 결과 1건씩 (GET /stats). 최근 days일, 단일 이미지, 끝난 것(success·error)만.
+
+        mock 결과는 뺌. 각 행: day, status, backend, seconds(대기+문구+이미지),
+        cost_usd, reference(upload·stock·none), downloaded, remade
+        """
+        rows = self._read(
+            """SELECT date(g.created_at, '+9 hours') AS day, g.status, g.backend,
+                      (COALESCE(g.queue_ms, 0) + COALESCE(g.text_ms, 0)
+                       + COALESCE(g.image_ms, 0)) / 1000.0 AS seconds,
+                      g.image_ms IS NOT NULL AS timed,
+                      g.cost_usd,
+                      COALESCE(json_extract(g.input_json, '$.reference_source'), 'none')
+                          AS reference,
+                      EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                             AND e.type IN ('download', 'copy_link')) AS downloaded,
+                      EXISTS(SELECT 1 FROM generations c WHERE c.parent_id = g.id)
+                          AS remade
+                 FROM generations g
+                WHERE g.status IN ('success', 'error') AND g.detail_page_id IS NULL
+                  AND g.backend != 'mock'
+                  AND g.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                        '+9 hours', 'start of day', ?, '-9 hours')
+                ORDER BY g.created_at""",
+            (f"-{max(0, days - 1)} days",),
+        )
+        return [dict(row) for row in rows]
+
     # ------------------------------------------------------------------ 상담·텍스트 호출
     def start_consult(
         self, client_id: str, ip: str | None, start: dict, first_message: dict
@@ -229,6 +262,17 @@ class GenerationRecords:
 
     def save_consult(self, consult: dict) -> None:
         db.save_consult(consult)
+
+    def start_advice(
+        self, client_id: str, ip: str | None, consult_id: str | None, advice: dict
+    ) -> str:
+        return db.start_advice(client_id, ip, consult_id, advice)
+
+    def get_advice(self, aid: str) -> dict | None:
+        return db.get_advice(aid)
+
+    def save_advice(self, advice: dict) -> None:
+        db.save_advice(advice)
 
     def add_text_call(
         self,
@@ -322,6 +366,11 @@ class GenerationRecords:
         path = self._reference_path(gid)
         if path is not None:
             path.write_bytes(data)
+
+    def reference_source(self, gid: str) -> str | None:
+        """원본 결과의 참고 사진 출처 (다시 만들기에서 이어 씀). 없으면 None."""
+        row = db.get_generation(gid)
+        return ((row or {}).get("input") or {}).get("reference_source")
 
     def load_reference(self, gid: str) -> bytes | None:
         path = self._reference_path(gid)

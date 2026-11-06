@@ -36,6 +36,9 @@ REPLY_BRIEF = (
     "정리했어요! 아래 내용으로 바로 만들 수 있어요. 바꾸고 싶은 게 있으면 적어 주세요."
 )
 REPLY_EDITED = "고쳐서 다시 정리했어요."
+REPLY_ADVICE_END = (
+    "광고 이야기가 아니라서 대화를 여기서 마칠게요. 바로 만들기는 언제든 쓸 수 있어요."
+)
 MAX_OFF_TOPIC = 3  # 같은 상담에서 연속 3번 주제 밖이면 종료
 BRIEF_EDITS = 2  # 기획서를 고칠 수 있는 횟수 (terra 호출)
 
@@ -46,6 +49,14 @@ class ConsultNotFoundError(LookupError):
 
 class ConsultEndedError(RuntimeError):
     """이미 끝난 상담 (409)."""
+
+
+class AdviceNotFoundError(LookupError):
+    """없는 조언 대화, 또는 다른 사람의 대화."""
+
+
+class AdviceEndedError(RuntimeError):
+    """끝난 조언 대화 (턴 수를 다 썼거나 주제 밖 3번)."""
 
 
 class ModerationError(ValueError):
@@ -84,6 +95,10 @@ class TextModels(ABC):
         quality: str,
     ) -> dict:
         """{"result", "fixed_typos", "source", "model", "cost_usd"}"""
+
+    @abstractmethod
+    def advise(self, history: list[dict], context: dict | None, quality: str) -> dict:
+        """{"off_topic", "reply", "chips", "go_create", "source", "model", "cost_usd"}"""
 
     @abstractmethod
     def moderate(self, text: str) -> bool:
@@ -135,6 +150,17 @@ class CoreTextModels(TextModels):
         from just_make_it.core.copy_convert import convert_copy
 
         return _wrap(convert_copy, text, fmt, product_name, area, facts, quality)
+
+    def advise(self, history, context, quality):
+        from just_make_it.core.advisor import advise
+
+        reply, res = _wrap(advise, history, context, quality)
+        return {
+            **reply,
+            "source": res.source,
+            "model": res.model,
+            "cost_usd": res.cost_usd,
+        }
 
     def moderate(self, text):
         from just_make_it.core.structured import moderate
@@ -245,6 +271,37 @@ class MockTextModels(TextModels):
             "source": "local" if quality == "basic" else "openai",
             "model": "mock",
             "cost_usd": 0.0 if quality == "basic" else 0.0005,
+        }
+
+    def advise(self, history, context, quality):
+        self._check("advise", quality)
+        text = history[-1]["text"]
+        base = {
+            "source": "local" if quality == "basic" else "openai",
+            "model": "mock",
+            "cost_usd": 0.0 if quality == "basic" else 0.002,
+        }
+        if self.OFF_TOPIC.search(text):
+            return {
+                **base,
+                "off_topic": True,
+                "reply": "그 부분은 도와드리기 어려워요. 가게 홍보 이야기로 돌아가 볼까요?",
+                "chips": [],
+                "go_create": False,
+            }
+        asked = sum(1 for m in history if m["role"] == "user")
+        go = asked >= 3 or "만들" in text
+        reply = "(mock 조언) 동네 손님이 많다면 네이버 플레이스부터 정리해 보세요."
+        if context:
+            reply += " 상담 기획서 내용에 맞췄어요."
+        if go:
+            reply += " 이제 광고 이미지를 만들어 볼까요?"
+        return {
+            **base,
+            "off_topic": False,
+            "reply": reply,
+            "chips": ["어디에 올리면 좋아요?", "문구는 어떻게 써요?"],
+            "go_create": go,
         }
 
     def moderate(self, text):
@@ -477,6 +534,117 @@ class AssistantService:
             "edits_left": c["edits_left"],
             "source": source,
         }
+
+    # ------------------------------------------------------------------ 광고 조언 (자유 대화)
+    async def advise(
+        self,
+        advice_id: str | None,
+        client_id: str,
+        ip: str | None,
+        text: str,
+        consult_id: str | None = None,
+    ) -> dict:
+        """조언 대화 한 턴 (POST /advice). 상담과 같은 규칙: 하루 새 대화 수·턴 수·Moderation·
+        주제 밖 3번 연속 종료·텍스트 금액 몫 (넘으면 로컬 Gemma).
+
+        새 대화는 첫 답이 나온 뒤에 저장한다 (모델이 실패하면 횟수도 안 셈).
+        consult_id가 내 상담이면 그 기획서(없으면 지금까지 답)를 context로 넘김.
+        """
+        s = self.settings
+        text = text.strip()
+        if advice_id is None:
+            await self._check_advice_limit(client_id, ip)
+            a = {"messages": [], "turn": 0, "off_topic": 0, "ended": False}
+            a["consult_id"] = consult_id
+        else:
+            a = await asyncio.to_thread(self.records.get_advice, advice_id)
+            if a is None or a["client_id"] != client_id:
+                raise AdviceNotFoundError(advice_id)
+            if a["ended"] or a["turn"] >= s.advice_max_turns:
+                raise AdviceEndedError(advice_id)
+
+        if await asyncio.to_thread(self.models.moderate, text):
+            # 원문은 남기지 않음. 이어지는 대화면 턴만 셈 (새 대화는 저장 안 함)
+            if advice_id is not None:
+                a["turn"] += 1
+                await asyncio.to_thread(self.records.save_advice, a)
+            logger.warning("조언 Moderation 걸림 advice=%s", advice_id)
+            await self._flag_advice("advice_moderation", client_id, ip)
+            raise ModerationError(advice_id or "new")
+
+        history = [{"role": m["role"], "text": m["text"]} for m in a["messages"]]
+        history.append({"role": "user", "text": text})
+        context = await self._advice_context(a.get("consult_id"), client_id)
+        res = await self._call(self.models.advise, history, context, quality="terra")
+
+        reply, chips = res["reply"], res["chips"]
+        if res["off_topic"]:
+            a["off_topic"] += 1
+            if a["off_topic"] >= MAX_OFF_TOPIC:
+                a["ended"] = True
+                reply, chips = REPLY_ADVICE_END, []
+        else:
+            a["off_topic"] = 0
+        a["turn"] += 1
+        if a["turn"] >= s.advice_max_turns:
+            a["ended"] = True
+        a["messages"].append({"role": "user", "text": text})
+        a["messages"].append({"role": "assistant", "text": reply, "chips": chips})
+
+        if advice_id is None:
+            advice_id = await asyncio.to_thread(
+                self.records.start_advice, client_id, ip, a["consult_id"], a
+            )
+            await self._spend("advice_start", client_id, ip, res)
+        else:
+            await asyncio.to_thread(self.records.save_advice, a)
+            await self._spend("advice_turn", client_id, ip, res)
+        if a["ended"] and a["off_topic"] >= MAX_OFF_TOPIC:
+            await self._flag_advice("advice_off_topic", client_id, ip)
+        return {
+            "advice_id": advice_id,
+            "reply": reply,
+            "chips": [] if a["ended"] else chips,
+            "go_create": bool(res["go_create"]) and not res["off_topic"],
+            "ended": a["ended"],
+            "turn": a["turn"],
+            "max_turns": s.advice_max_turns,
+            "source": res["source"],
+        }
+
+    async def _check_advice_limit(self, client_id: str, ip: str | None) -> None:
+        s = self.settings
+        count = self.records.count_text_calls
+        if (
+            s.advice_daily_limit
+            and await asyncio.to_thread(count, "advice_start", client_id=client_id)
+            >= s.advice_daily_limit
+        ):
+            raise DailyLimitError("조언 하루 횟수 초과 (client)")
+        if (
+            ip
+            and s.advice_ip_daily_limit
+            and await asyncio.to_thread(count, "advice_start", ip=ip)
+            >= s.advice_ip_daily_limit
+        ):
+            raise DailyLimitError("조언 하루 횟수 초과 (IP)")
+
+    async def _advice_context(
+        self, consult_id: str | None, client_id: str
+    ) -> dict | None:
+        """내 상담이면 기획서(없으면 지금까지 답). 남의 상담·없는 상담은 무시."""
+        if not consult_id:
+            return None
+        c = await asyncio.to_thread(self.records.get_consult, consult_id)
+        if c is None or c["client_id"] != client_id:
+            return None
+        return {"기획서": c["brief"]} if c["brief"] else {"상담 답": c["answers"]}
+
+    async def _flag_advice(self, reason: str, client_id: str, ip: str | None) -> None:
+        try:
+            await asyncio.to_thread(self.records.add_flag, reason, client_id, ip)
+        except Exception:
+            logger.warning("flag 기록 실패 (advice)", exc_info=True)
 
     # ------------------------------------------------------------------ 문구 변환
     async def convert(
