@@ -38,7 +38,7 @@
 | `POST` | `/consults` | AI 광고 상담 시작 (첫 질문) | ① 상담 |
 | `POST` | `/consults/{id}/messages` | 상담에 답하기 → 다 답하면 기획서 | ① 상담 |
 | `GET` | `/consults/{id}` | 상담 다시 열기 (새로고침) | ① 상담 |
-| `POST` | `/advice` | AI 광고 조언 (자유 대화, 서빙 라우트 미구현) | ① 상담 |
+| `POST` | `/advice` | AI 광고 조언 (자유 대화) | ① 상담 |
 | `POST` | `/copies/convert` | 광고 문구를 채널별로 올릴 글로 바꾸기 (게시 문구 키트) | ⑤ 결과 확인 |
 | `POST` | `/detail-pages` | 상세페이지 생성 시작 (비동기) | ④ 생성 요청 (커머스) |
 | `GET` | `/detail-pages/{id}` | 상세페이지 진행 상황·결과 조회 (폴링) | ④ 대기 → ⑤ 결과 확인 |
@@ -183,8 +183,8 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 프론트가 사진 없을 때 Pixabay 후보를 보여 주고(프론트 `app/api/pixabay`), 고르면 그 사진을 `reference_image`로 올립니다. 정량평가에서 "사진 있음/없음/고른 사진"을 나눠 보려고 출처만 받습니다.
 
 - `reference_image` 없이 `upload`·`stock`이 오면 `null`로 저장 (오류 아님). 모르는 값은 `422`
-- `parent_id`로 다시 만들면 원본 값을 이어 씀
-- 조회 응답 `input.reference_source`로 돌려줌
+- `parent_id`로 다시 만들면 원본 값을 이어 씀 (사진을 새로 올리면 새로 보낸 값)
+- 조회 응답 `input.reference_source`로 돌려줌. 사진 없음·예전 결과는 `null` (`/stats`에서는 `none`으로 묶음) — 서빙 11-06
 
 ### `GET /generations/{id}` — 결과 조회
 
@@ -357,7 +357,7 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 | `remade` | 그중 다시 만들기·조금 수정하기의 원본이 된 결과 수 (`parent_id` 기준) |
 | `*_rate` | `generated` 대비 비율 |
 
-**정량평가 추가 칸** (11-04, 서빙 미구현 — 각 행에 추가. 새 테이블 없이 `generations` 열로 집계. 발표 "정량평가" 장표의 출처)
+**정량평가 추가 칸** (11-04 요청, 서빙 11-06 — 각 행에 추가. 새 테이블 없이 `generations` 열로 집계. 발표 "정량평가" 장표의 출처)
 
 | 필드 | 뜻 | 계산 |
 |---|---|---|
@@ -373,7 +373,11 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
  "by_reference": {"upload": {"generated": 22, "download_rate": 0.68, "remake_rate": 0.27}, "stock": {"generated": 8, "download_rate": 0.5, "remake_rate": 0.38}, "none": {"generated": 10, "download_rate": 0.3, "remake_rate": 0.5}}}
 ```
 
-- `mock` 결과는 집계에서 뺌
+- `mock` 결과는 이 칸들에서 뺌 (위의 `generated`·`*_rate` 기존 지표는 예전처럼 다 셈 → 로컬 mock 서버에서는 기존 지표만 값이 있음)
+- 계산할 결과가 없으면 `null` (`by_reference`의 각 키는 항상 있고, 그 출처 결과가 0개면 비율이 `null`)
+- 생성 시간·로컬 비율·1장당 비용은 성공한 결과만, `cost_usd`는 실패한 결과의 비용도 더함, `error_rate`는 끝난 결과(성공+실패) 대비. 만드는 중인 결과는 빼고
+- 분위수는 선형 보간, 초 단위 소수 1자리
+- `days`에는 성공한 결과가 있는 날만 나옴 (실패만 있는 날은 `total`에만 반영)
 
 ### `GET /tips` — 대기 중 정보 카드
 
@@ -451,15 +455,21 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 
 ### `POST /advice` — AI 광고 조언 (자유 대화)
 
-상담(`/consults`)은 칸을 채워 기획서를 만드는 용도, 이건 자유롭게 묻는 용도. 대화 기록은 서버가 들고 있음. core `advisor.advise`는 있고 **서빙 라우트만 없음**.
+상담(`/consults`)은 칸을 채워 기획서를 만드는 용도, 이건 자유롭게 묻는 용도. 대화 기록은 서버(`advices` 테이블)가 들고 있음. core `advisor.advise`(terra) — 서빙 11-06.
 
 **요청** `{"advice_id": null, "text": "손님이 동네 주민인데 어디에 올려요?", "consult_id": null}`
 - `advice_id`가 `null`이면 새 대화. `consult_id`가 있으면 그 기획서를 `context`로 넘김
 - `text` 500자 이하
 
-**응답** `200` `{"advice_id": "…", "reply": "…", "chips": ["…"], "go_create": false, "ended": false}`
+**응답** `200` `{"advice_id": "a_…", "reply": "…", "chips": ["…"], "go_create": false, "ended": false, "turn": 1, "max_turns": 12, "source": "openai"}`
 - `go_create: true`면 프론트가 "이미지 만들러 가기" 버튼을 보여 줌
-- 하루 횟수·턴 수·Moderation·주제 밖 3회 종료·금액 상한은 `/consults`와 같은 규칙 (`429`, `409` 끝난 대화)
+- `turn`·`max_turns`·`source`(`openai`·`local`)는 서빙이 덧붙인 칸 (안 써도 됨)
+- 새 대화는 첫 답이 나온 뒤에 저장 → 모델이 실패하면(`503`) 하루 횟수도 안 셈
+- `consult_id`는 내 상담이면 기획서(아직 없으면 지금까지 답)를 참고, 남의 상담·없는 상담은 무시 (오류 아님)
+- `/consults`와 같은 규칙, 횟수는 따로 셈: 하루 새 대화 client 3회 · IP 10회(`429`), 대화 1개에 글 12개까지(다 쓰면 `ended: true`, 이후 `409`), Moderation(`400`, 이어지는 대화면 턴은 셈, 원문 저장 안 함), 주제 밖 3번 연속이면 `ended: true`, 텍스트 금액 몫을 넘거나 OpenAI가 실패하면 로컬 Gemma
+- 오류: `400` 빈 글·Moderation · `404` 없는 대화(남의 대화도) · `409` 끝난 대화 · `413` 500자 초과 · `422` 형식 · `429` 횟수 · `503` 모델 응답 없음 (프론트는 기본 안내로 대체)
+- 악용 감지는 `flags`에 `advice_moderation`·`advice_off_topic`으로 남김
+- 설정: `ADVICE_DAILY_LIMIT`(3) · `ADVICE_IP_DAILY_LIMIT`(10) · `ADVICE_MAX_TURNS`(12)
 
 ### `POST /copies/convert` — 문구 형식 바꾸기 (게시 문구 키트)
 
@@ -660,5 +670,5 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - [ ] 프론트 전환: 비동기 생성(`POST /generations` + 폴링, 선택), 나란히 보기(`/family`), 사용 기록(`/events`), 고친 그림 저장(`/image`) 호출 — 서비스
 - [x] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 서빙 11-04. 장면 품질(가운데 아래가 실제로 비는지)은 VM에서 확인 필요 — 모델
 - [x] 단일 이미지는 요청당 1장 (여러 장 후보 생성 없음, V4 보류). 비교는 "한 번 더 만들기" + 같은 원본 목록으로 — PM 10-28
-- [ ] 서빙 요청 (11-04): `POST /advice` 라우트 · `reference_source` 저장(`input_json`) · `GET /stats` 정량평가 칸 — 서빙
+- [x] 서빙 요청 (11-04): `POST /advice` 라우트 · `reference_source` 저장(`input_json`) · `GET /stats` 정량평가 칸 — 서빙 11-06
 - [ ] 모델 요청 (오프라인 정량평가, API 아님): `core/evaluation/run_eval.py`의 `results.csv`에 `clip_score`(프롬프트-그림) · `ref_similarity`(참고 사진-결과, 사진 있는 실행만) · `ocr_match`(얹은 문구 OCR 일치율, `combined`만) 열 추가, `make_report.py`에 실행별 평균·p95 표. 비교 실행 `v1`(사진 없음)·`v1_ref`(사진 있음)·`v1_api`(OpenAI), 같은 13개 케이스. 채점 모델(CLIP·OCR)은 평가 때만 CPU로 띄우고 서빙 이미지·VRAM에 넣지 않음 — 모델
