@@ -61,6 +61,7 @@ class GenerationRecords:
                 "message": spec.message,
                 "style": spec.style,
                 "adjustments": spec.adjustments,
+                **({"image_model": spec.image_model} if spec.image_model else {}),
                 **({"consult_id": spec.consult_id} if spec.consult_id else {}),
                 **({"keep_product": True} if spec.keep_product else {}),
                 **(

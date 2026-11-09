@@ -357,6 +357,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         consult_id=payload.consult_id,
         keep_product=payload.keep_product,
         reference_source=source,
+        image_model=payload.image_model,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model

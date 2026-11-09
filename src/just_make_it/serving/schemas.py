@@ -145,6 +145,9 @@ class GenerationInput(BaseModel):
     keep_product: bool = False
     # 참고 사진 출처: upload · stock · None(사진 없음, 예전 결과)
     reference_source: ReferenceSource | None = None
+    # 사용자가 고른 이미지 품질 (결과 화면 "다시 만들기"의 기본값). 예전 결과는 None.
+    # 실제로 쓴 모델은 응답의 source (빠르게를 골라도 대기가 길면 OpenAI로 갈 수 있음)
+    image_model: ImageModel | None = None
 
 
 class GenerationProgress(BaseModel):
@@ -397,6 +400,8 @@ class GenerationSpec:
     keep_product: bool = False
     # 참고 사진 출처 (기록용, upload · stock). 사진이 없으면 None
     reference_source: str | None = None
+    # 사용자가 고른 이미지 품질 (기록용, input.image_model). 실제 경로는 submit의 premium이 정함
+    image_model: str | None = None
     # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
     # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
     output: Literal["combined", "image"] = "combined"
