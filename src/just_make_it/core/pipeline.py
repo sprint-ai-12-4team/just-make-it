@@ -24,6 +24,7 @@ keep_product=True면 상품 없는 장면만 그리고 문구는 위쪽(top)에 
 """
 
 import io
+import logging
 import time
 from dataclasses import dataclass
 
@@ -361,3 +362,36 @@ def _to_png(image_bytes):
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+logger = logging.getLogger(__name__)
+
+# 웜업은 모델 불러오기와 GPU 첫 계산 준비가 목적이라 작은 크기 한 장이면 충분함
+WARMUP_SIZE = 512
+WARMUP_PROMPT = "A plain white ceramic cup on a wooden table. Photorealistic."
+
+
+def warmup():
+    """서버를 켤 때 로컬 이미지 모델(klein)을 미리 불러와 작은 이미지 한 장을 만들어 둡니다.
+
+    배포 직후 첫 사용자가 klein 불러오기와 GPU 첫 계산 준비를 기다리지 않게 합니다.
+    - OpenAI는 부르지 않음: generate_ad_image를 거치지 않고 klein을 직접 불러, 실패해도 flare로 넘어가지 않음
+    - 실패해도 에러를 내지 않음: 서버는 그대로 뜨고, 첫 요청 때 지금처럼 다시 불러옴
+    - 만든 이미지는 버림. 생성 중 쓴 임시 메모리는 klein.generate가 끝날 때 비움
+    - KLEIN_UNLOAD_AFTER_USE면 쓰고 바로 내리는 설정이라 미리 올려 둘 의미가 없어 건너뜀
+
+    Returns:
+        float 또는 None: 걸린 시간(초). 건너뛰었거나 실패하면 None
+    """
+    if config.KLEIN_UNLOAD_AFTER_USE:
+        logger.info("KLEIN_UNLOAD_AFTER_USE가 켜져 있어 klein 웜업을 건너뜁니다.")
+        return None
+    start = time.perf_counter()
+    try:
+        ai_models.get_klein().generate(WARMUP_PROMPT, WARMUP_SIZE, WARMUP_SIZE, seed=0)
+    except Exception as e:  # GPU 없음, 메모리 부족 등. 서버가 죽지 않게 기록만 함
+        logger.warning("klein 웜업 실패, 첫 요청 때 다시 불러옵니다: %s", e)
+        return None
+    elapsed = round(time.perf_counter() - start, 2)
+    logger.info("klein 웜업 완료 (%.2f초)", elapsed)
+    return elapsed
