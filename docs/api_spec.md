@@ -107,7 +107,8 @@
   "message": "신메뉴 출시",
   "style": "따뜻한",
   "adjustments": [],
-  "parent_id": null
+  "parent_id": null,
+  "image_model": "flux2-klein-4b"
 }
 ```
 
@@ -136,7 +137,6 @@
 | `message` | 실제로 얹은 문구. `텍스트 짧게`를 고르면 줄어든 문구가 옴 |
 | `text_layout` | 실제로 얹은 글자 위치·글꼴·크기 ([5. 공통 값](#text_layout--글자-위치글꼴크기)). 결과 화면의 "글자 고치기" 초기값 |
 | `source` | `local` (GPU) 또는 `openai`. 통계용, 화면 노출 금지 |
-
 | `product_url` | `keep_product`일 때 받은 상품 사진(배경 투명). 아니면 `null` |
 
 #### `keep_product` — 내 상품 사진 그대로, 배경만 AI로 (S1)
@@ -211,6 +211,8 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 ```
 
 - `status`: `success` | `processing` | `error`
+- `input`: 요청값 중 `purpose`·`product_name`·`message`·`style`·`adjustments` + 있으면 `consult_id`·`keep_product`·`reference_source`
+  - **`image_model` 추가 요청 (11-09, 서빙)**: 다시 만들기가 처음 고른 품질을 이어 쓰도록. 예전 결과는 `null`. FE는 없으면 `flux2-klein-4b`로 봄
 - 없는 `id`면 `404`
 - 글자를 고쳤으면 고친 뒤의 `image_url`·`message`·`text_layout`이 옴 (링크 공유도 최신 상태)
 - `processing`이면 `progress`가 함께 옴 (V3). 그 밖에는 `null`
@@ -311,11 +313,11 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 |--------|------|-------------|
 | `download` | "내 기기에 저장" | `{"edited": true}` (직접 고친 그림이면) |
 | `copy_link` | "링크 복사" | |
-| `remake` | "다시 만들기" | `{"adjustments": ["더 밝게"]}` |
+| `remake` | "다시 만들기" | `{"adjustments": ["더 밝게"], "image_model": "flux2-klein-4b"}` |
 | `edit_text` | 글자 직접 고치기 시작 | |
 | `cutout` | 배경 지우고 색 채우기 완료 | |
 | `pick_copy` | 추천 문구 중 하나를 고름 | `{"index": 1, "copy": "…"}` |
-| `add_qr` | 그림에 QR을 붙여 저장 | `{"host": "naver.me"}` (전체 주소는 남기지 않음) |
+| `add_qr` | 그림에 QR을 붙여 저장 (QR은 프론트가 그림에 합쳐 `/image`로 저장) | `{"host": "naver.me"}` (전체 주소는 남기지 않음) |
 | `tip_click` | 대기 카드를 누름 | `{"tip_id": "season-1111"}` (`generation_id`는 지금 기다리는 결과) |
 | `copy_kit` | 게시 문구 키트에서 [복사] | `{"format": "instagram_hashtags"}` |
 
@@ -654,21 +656,25 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 
 ## 6. 미결 사항
 
-- [ ] 상세페이지 섹션 수(5)·섹션 이미지 크기 확정 — PM·모델
-- [ ] 상세페이지 작업 실행 방식 (FastAPI `BackgroundTasks` vs 별도 대기열), 서버 재시작 시 진행 중이던 작업 처리 — 서빙
-- [x] 상세페이지 저장 구조 → `detail_pages` 테이블 + 섹션 이미지는 `generations` 행 (`detail_page_id`, `section_index`). `docs/schema.sql` 참고 (코드가 읽는 위치는 `service/schema.sql`로 이동 예정)
-- [x] 모델 선택 → `image_model`(`/generate`·`/detail-pages`), `text_model`(`/copies`). 프론트는 고정 목록 사용, `GET /models`는 상주 모델이 바뀔 때 추가 — 서빙
-- [x] 저장소 → **VM 로컬 디스크** (DB: SQLite, 이미지: `$DATA_DIR/images`, `/images/{id}.png`로 제공, 만료 없음). 코드 `service/db.py`, `service/storage.py`
-- [ ] 일일 생성 한도 값, 비로그인 허용 여부 — PM
-- [ ] 참고 사진 최대 크기 10MB 확정 — 서빙·모델
-- [ ] 프리미엄(OpenAI 강제) 요청 필드 필요 여부 — PM·서비스
-- [x] 글자 자유 위치 → 닫음 (11-04). 프론트 canvas에서 단어별 위치·크기·글꼴·색까지 고치고 `POST /generations/{id}/image`로 저장. `text_layout`에 `x`·`y` 추가 안 함 — PM
-- [x] 다시 만들기 때 원본 참고 사진: 조회 응답에 사진이 없어 프론트가 다시 못 보냄 → 서버가 `parent_id`의 참고 사진을 재사용 — 서빙
-- [x] 사용 기록·고친 그림 저장·같은 원본 목록 → PM·서비스 추가 명세(api_spec_next, 10-28) 그대로 반영. 서비스 함수 `db.add_event`·`db.replace_image`·`db.family` + 서빙 라우트
-- [ ] 같은 원본 목록(`/family`)은 결과 `id`만 알면 누구나 볼 수 있음 (공유 링크를 받은 사람도 이전 시안을 봄). 로그인(S3) 때 `client_id`로 제한 — PM
-- [ ] `/stats`는 인증 없이 열려 있음 (합계 숫자만 나옴). 외부에 숨기려면 관리자 키 추가 — PM·서빙
-- [ ] 프론트 전환: 비동기 생성(`POST /generations` + 폴링, 선택), 나란히 보기(`/family`), 사용 기록(`/events`), 고친 그림 저장(`/image`) 호출 — 서비스
-- [x] 내 사진 그대로 배경만 바꾸기: `/generate`에 `keep_product: bool` (S1·M5) — 서빙 11-04. 장면 품질(가운데 아래가 실제로 비는지)은 VM에서 확인 필요 — 모델
-- [x] 단일 이미지는 요청당 1장 (여러 장 후보 생성 없음, V4 보류). 비교는 "한 번 더 만들기" + 같은 원본 목록으로 — PM 10-28
-- [x] 서빙 요청 (11-04): `POST /advice` 라우트 · `reference_source` 저장(`input_json`) · `GET /stats` 정량평가 칸 — 서빙 11-06
-- [ ] 모델 요청 (오프라인 정량평가, API 아님): `core/evaluation/run_eval.py`의 `results.csv`에 `clip_score`(프롬프트-그림) · `ref_similarity`(참고 사진-결과, 사진 있는 실행만) · `ocr_match`(얹은 문구 OCR 일치율, `combined`만) 열 추가, `make_report.py`에 실행별 평균·p95 표. 비교 실행 `v1`(사진 없음)·`v1_ref`(사진 있음)·`v1_api`(OpenAI), 같은 13개 케이스. 채점 모델(CLIP·OCR)은 평가 때만 CPU로 띄우고 서빙 이미지·VRAM에 넣지 않음 — 모델
+### 열림
+
+| 할 일 | 담당 |
+|-------|------|
+| `GET /generations/{id}`의 `input`에 `image_model` 저장·반환 ([위](#get-generationsid--결과-조회)) — 11-09 | 서빙 |
+| 서버 시작 시 로컬 이미지 모델 웜업 (`main.py` `lifespan`, 백그라운드 1장, FP16·캐시 정리, mock이면 건너뜀). 지금은 배포 직후 첫 생성이 느림 — 11-09 | 모델·서빙 |
+| 오프라인 정량평가: `run_eval.py` `results.csv`에 `clip_score`·`ref_similarity`·`ocr_match`, `make_report.py`가 실행별 표 + `results/summary.json`. 실행 `v1`·`v1_ref`·`v1_api`, 13개 케이스. 채점은 CPU만, OpenAI 안 씀 — 11-04 | 모델 |
+| `keep_product` 장면에서 가운데 아래가 실제로 비는지 VM 확인 | 모델 |
+| 상세페이지 섹션 수(5)·섹션 이미지 크기 | PM·모델 |
+| 상세페이지 작업 실행 방식, 재시작 시 진행 중 작업 처리 | 서빙 |
+| 일일 생성 한도 값, 비로그인 허용 여부 / 참고 사진 최대 10MB 확정 | PM / 서빙·모델 |
+| 접근 제한: `/family`·`/image`·`/text`는 `id`만 알면 누구나, `/stats`는 인증 없음 → 로그인(S3)·관리자 키 때 | PM·서빙 |
+
+### 닫힘 (요약)
+
+- 저장소: VM 로컬 디스크 (SQLite + `$DATA_DIR/images`, 만료 없음). 상세페이지는 `detail_pages` + `generations` 행 (`docs/schema.sql`)
+- 모델 선택: `image_model`·`text_model` 고정 목록, `GET /models`는 상주 모델이 바뀔 때. OpenAI 강제는 `image_model: openai-image-2.5-flare`로 대신함
+- 글자: 서버가 얹고, 자유 위치·단어별 편집은 프론트 canvas → `/image` 저장 (11-04). `text_layout`에 `x`·`y` 없음
+- 다시 만들기 사진: 서버가 `parent_id`의 참고 사진 재사용
+- 사용 기록·고친 그림 저장·같은 원본 목록·`keep_product`·비동기 생성: 서빙·프론트 모두 반영 (10-28 ~ 11-04)
+- 단일 이미지는 요청당 1장 (V4 보류) — 10-28
+- `/advice`·`reference_source`·`/stats` 정량평가 칸: 서빙 11-06
