@@ -1,22 +1,55 @@
 ![소셜 프리뷰](https://repository-images.githubusercontent.com/1420090534/f4e71eab-df1f-495f-9042-c83ecb2b184c)
 # JUST MAKE IT - AI 광고 이미지 생성 서비스
 > **"Just Make It" 팀의 하이브리드 AI 이미지 생성 및 서빙 플랫폼 프로젝트입니다.**  
-> 본 프로젝트는 GCP L4 GPU 환경의 가성비와 OpenAI API의 안정성을 결합하여 대규모 트래픽(MAU) 대응이 가능한 광고 이미지 생성 아키텍처를 구축합니다.
+> 소상공인이 웹에서 광고 이미지·문구를 직접 만드는 서비스입니다. 평소에는 GCP L4 GPU의 로컬 모델로 비용 없이 만들고, GPU가 밀리거나 "더 정교하게"를 고르면 OpenAI로 넘깁니다.
 
----
-## Github Repository
-
-> [팀 저장소 바로가기](https://github.com/sprint-ai-12-4team/just-make-it)
 ---
 
 ## 프로젝트 개요 및 핵심 아키텍처
 
-우리의 목표는 **비용 최적화**와 **무중단 서비스 보장**을 동시에 달성하는 것입니다.
+목표는 **비용 최적화**와 **끊기지 않는 서비스**를 함께 잡는 것입니다.
+
+```mermaid
+flowchart LR
+    U[사용자<br/>Next.js · Vercel] --> A[FastAPI<br/>GCP L4 VM]
+    A --> Q{GPU 대기열}
+    Q -->|여유 있음| L[로컬 모델<br/>FLUX.2 klein-4B · Gemma 4]
+    Q -->|가득 참 · 더 정교하게| O[OpenAI<br/>Image 2.5 · GPT-5.6]
+    L --> S[(SQLite + 디스크)]
+    O --> S
+```
 
 *   **기본 라우팅 (로컬 L4 GPU):** 일반적인 이미지 생성 요청은 자체 서빙 모델(FLUX.2 klein-4B)로 처리하여 비용을 `0원`으로 수렴시킵니다.
 *   **우회 라우팅 (OpenAI Fallback):** 로컬 GPU 대기 큐(Queue)가 가득 차거나 프리미엄 기능을 요청할 경우, `OpenAI Image 2.5 API`로 요청을 즉시 우회하여 유저 대기 시간을 최소화합니다.
+*   **문구:** 로컬 Gemma 4 12B, "더 자연스럽게"를 고르면 OpenAI GPT-5.6 Luna.
 
-⚠️ **하드웨어 제약 조건:** GCP g2-standard-4 인스턴스는 **시스템 RAM이 16GB**로 매우 제한적입니다. 모든 파트는 메모리 누수 방지 및 최적화 설정을 최우선으로 고려해야 합니다.
+**개발·운영 환경:** GCP `g2-standard-4` (NVIDIA L4 24GB VRAM, 시스템 RAM 16GB) 한 대에서 돌아가도록 설계했습니다. 작은 RAM에 맞춰 FP16 추론, 추론 후 VRAM 캐시 정리, 단일 워커(`--workers 1`) + 자체 대기열로 GPU 작업 수를 제한하고, OpenAI 비용은 일일 예산 상한으로 막습니다.
+
+---
+
+## 기술 스택
+
+| 영역 | 사용 기술 |
+|------|-----------|
+| 프론트엔드 | Next.js 15, React 19, TypeScript, Tailwind CSS, transformers.js(브라우저 배경 지우기) |
+| 백엔드 | Python 3.11, FastAPI, Pydantic, uv, SQLite |
+| 모델 | FLUX.2 klein-4B(diffusers), Gemma 4 12B, OpenAI Image 2.5 Flare · GPT-5.6 Luna |
+| 인프라 | Docker(멀티스테이지), Docker Compose, GitHub Actions, GCP Compute Engine(L4), Vercel |
+
+---
+
+## 주요 기능
+
+| 기능 | 설명 |
+|------|------|
+| AI 광고 상담 | 몇 가지 질문에 답하면 광고 기획서(목표·채널·문구·분위기)를 만들어 바로 만들기로 이어짐. 자유 질문용 조언 대화도 있음 |
+| 문구 추천 | 상품 이름·하고 싶은 말로 광고 문구 3개 추천. 할인율·가격은 입력값 그대로 |
+| 광고 이미지 생성 | 채널(인스타그램·스마트스토어·유튜브·카카오톡)에 맞는 크기로 생성, 서버가 문구를 분위기에 맞게 얹음. 기다리는 동안 진행 막대·정보 카드 |
+| 내 상품 그대로 | 상품 사진은 픽셀 그대로 두고 배경 장면만 AI로 (`keep_product`) |
+| 다시 만들기·조금 수정하기 | 더 밝게·배경 단순하게·텍스트 짧게, 품질 선택. 같은 원본에서 만든 결과를 나란히 비교 |
+| 직접 고치기 | 글자(단어별 글꼴·색·크기·위치), 배경 지우고 색 채우기, 가게 QR(테두리·점 모양·가운데 로고). 고친 그림은 링크에도 저장 |
+| 게시 문구 키트 | 인스타 본문·해시태그·스토리, 네이버 쿠폰·블로그 제목 등 채널별 글로 변환 |
+| 상세페이지 | 커머스용 5개 섹션(대표·특징·마무리)의 문구와 이미지 |
 
 ---
 
@@ -54,6 +87,18 @@
 
 Codeit LMS에 별도 파일로 제출합니다.
 
+---
+
+## 문서
+
+| 문서 | 내용 |
+|------|------|
+| [`docs/api_spec.md`](docs/api_spec.md) | API 명세 (엔드포인트·요청·응답·미결 사항) |
+| [`docs/product/user_flow.md`](docs/product/user_flow.md) | 유저 플로우 |
+| [`docs/product/model_selection.md`](docs/product/model_selection.md) | 모델 선택 근거 |
+| [`frontend/README.md`](frontend/README.md) | 프론트엔드 상세 |
+| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | 브랜치·리뷰·담당 영역 규칙 |
+| [`CLAUDE.md`](CLAUDE.md) | AI 코딩 에이전트용 규칙 (하드 제약·담당 영역) |
 
 ---
 
@@ -74,11 +119,11 @@ uv sync
 ```
 
 ### 3. 환경 변수 설정 (`.env`)
-프로젝트 루트에 `.env` 파일을 생성하고 아래 키를 입력합니다. (**Git에 커밋 금지**)
-```text
-OPENAI_API_KEY=your_openai_api_key_here
-GOOGLE_APPLICATION_CREDENTIALS=path_to_your_gcp_key.json
+```bash
+cp .env.example .env   # 값 채우기. Git에 커밋 금지
 ```
+- 필수는 `OPENAI_API_KEY`. 나머지(한도·예산·백엔드 등)는 `.env.example`의 설명과 기본값 참고
+- GPU 없이 화면·API만 볼 때는 `IMAGE_BACKEND=mock`
 
 ### 4. 실행 방법 (두 가지)
 
@@ -97,14 +142,14 @@ docker compose logs -f api
 docker compose down
 ```
 - 모델 가중치는 이미지에 포함되지 않습니다. `model-cache` 볼륨에 캐시됩니다.
-- 코드 변경 시 `--reload`가 적용됩니다 (개발용).
+- 코드를 바꾸면 `--build`로 다시 빌드합니다.
 
 #### B. 호스트에서 직접 실행 (모델 빠른 실험용)
 ```bash
 uv run uvicorn just_make_it.serving.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 - CUDA가 호스트에 설치되어 있어야 로컬 모델을 사용할 수 있습니다.
-- GPU가 없거나 테스트만 할 경우 OpenAI Fallback만 사용하는 모드를 고려하세요.
+- GPU가 없으면 `IMAGE_BACKEND=mock`으로 띄웁니다 (OpenAI 호출 없음).
 
 ### 5. 프론트엔드 (Next.js)
 ```bash
@@ -114,73 +159,58 @@ npm install
 npm run dev
 ```
 - 브라우저: http://localhost:3000
-- 백엔드 API 주소는 `.env.local`의 `NEXT_PUBLIC_API_URL` (기본 `http://localhost:8000`)
+- 백엔드 API 주소는 `.env.local`의 `NEXT_PUBLIC_API_URL` (기본 `http://localhost:8000`). 서버 없이 화면만 볼 때는 `NEXT_PUBLIC_MOCK=1`
 - 상세: `frontend/README.md`
+
+### 6. 테스트
+```bash
+uv run pytest tests/ -v
+```
+- 테스트에서 실제 OpenAI API를 부르지 않습니다 (팀 한도 $30).
 
 ---
 
 ## 🚀 CI/CD 및 배포 파이프라인
 
-`main` 브랜치에 `push` 또는 `PR merge`가 발생하면 GitHub Actions를 통해 GCP L4 인스턴스에 자동 배포됩니다.
+`main`·`dev` 브랜치에 push(PR 머지 포함)하면 GitHub Actions(`.github/workflows/cd.yml`)가 GCP L4 인스턴스에 자동 배포합니다. 프론트엔드는 Vercel에 배포됩니다.
 
 *   **배포 방식:** Docker 멀티 스테이지 빌드 기반 컨테이너 배포
-*   **실행 옵션:** 시스템 RAM 사수를 위해 인스턴스 내에서 반드시 `--workers 1` 및 GPU 옵션으로 격리 구동됩니다.
-*   **인프라 수칙:** 인스턴스 OS 단계에서 최소 16GB이상의 Swap Memory가 상시 활성화되어 있어야 합니다.
+*   **실행 옵션:** RAM 16GB에 맞춰 `--workers 1`, GPU를 할당한 컨테이너 하나로 구동합니다. 모델 로드 순간의 메모리 급증은 VM의 Swap(32GB)으로 흡수합니다.
 *   **모델 가중치:** 이미지에 포함하지 않고, 시작 시 캐시/볼륨에서 로드합니다.
 
 ---
 
-## 🤝 협업 가이드 (Git Branch Strategy)
+## 🤝 협업 방식
 
-*   `main`: 프로덕션 배포 브랜치 (직접 푸시 절대 금지)
-*   `dev`: 각 파트 통합 테스트 브랜치(PR은 이 브랜치에서만)
-*   `feature/{role}-{기능명}`: 각 파트별 작업 브랜치
-    *   예: `feature/model-sdxl-lightning`
-    *   예: `feature/serving-fallback-logic`
-    *   예: `feature/service-gcs-upload`
-*   **Code Review:** 모든 PR은 담당 파트 외 2명 이상의 리뷰와 승인(Approve)을 거쳐 `main`에 머지됩니다.
+4인 팀이 역할별 폴더를 나눠 맡고, `feature/*` → `dev`(통합·배포) → `main` 흐름으로 PR 리뷰 후 머지했습니다. 자세한 규칙: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
 
 ---
 
-## 기본 디렉토리
+## 디렉토리
 ```bash
 just-make-it/
-├── .github/
-│   └── workflows/
-│       └── cd.yml               # GitHub Actions CI/CD 스크립트
-├── Dockerfile                   # 멀티스테이지 빌드 (builder + runtime)
-├── docker-compose.yml           # 로컬 개발/테스트 (GPU)
-├── .dockerignore
-├── .python-version              # uv가 관리하는 파이썬 버전 (예: 3.11)
-├── pyproject.toml               # uv 프로젝트 설정 및 의존성 관리
-├── uv.lock                      # uv 패키지 락 파일 (버전 고정)
-├── CLAUDE.md                    # AI 코딩 에이전트용 프로젝트 지시서
-├── README.md                    # [PM] 프로젝트 기획 및 가이드문서
-├── docs/                        # [PM] 기능 명세서, API 스펙, 제품 문서
-│   ├── api_spec.md
-│   └── product/
-│       └── user_flow.md
-├── frontend/                    # Next.js 프론트엔드 (소상공인 UI)
-│   ├── app/                     # 페이지 (목적 선택 → 생성 → 결과)
-│   ├── components/
-│   └── lib/
-├── src/
-│   └── just_make_it/            # uv 메인 패키지 root
-│       ├── __init__.py
-│       ├── config.py            # 환경 변수 및 설정 (OpenAI Key, VRAM 제한 등)
-│       ├── core/                # [모델 개발] 파이프라인 최적화 및 로드 담당
-│       │   ├── __init__.py
-│       │   ├── loader.py        # SDXL, LoRA 로드 및 RAM 16GB 최적화 옵션 설정
-│       │   └── pipeline.py      # local_sd_pipeline 추론 실행 및 VRAM 캐시 비우기
-│       ├── serving/             # [서빙] API 라우팅 및 하이브리드 로직 분기 담당
-│       │   ├── __init__.py
-│       │   ├── main.py          # FastAPI 실행 엔트리포인트 (Workers=1 설정)
-│       │   ├── router.py        # /generate 엔드포인트
-│       │   └── queue_manager.py # 로컬 GPU 상태 체크 (is_busy) 및 OpenAI Fallback 제어
-│       └── service/             # [서비스 개발] 백엔드 비즈니스 로직, 외부 연동 담당
-│           ├── __init__.py
-│           ├── gcs_storage.py   # 생성된 이미지를 Google Cloud Storage에 업로드
-│           └── user_auth.py     # 유저 권한 및 프리미엄 모드 체크
-└── tests/                       # 테스트 코드 영역
-    └── test_serving.py
+├── .github/workflows/cd.yml     # VM 자동 배포
+├── Dockerfile                   # 멀티스테이지 빌드
+├── docker-compose.yml           # 전체 스택 (GPU)
+├── pyproject.toml, uv.lock      # uv 의존성
+├── .env.example                 # 환경 변수 목록
+├── CLAUDE.md                    # AI 코딩 에이전트용 규칙
+├── docs/                        # [PM] API 명세, 제품 문서
+├── frontend/                    # [서비스] Next.js 15 (app·components·lib)
+├── src/just_make_it/
+│   ├── core/                    # [모델] 모델 로드·추론, 프롬프트, 문구, 글자 얹기, 평가(evaluation/)
+│   ├── serving/                 # [서빙] FastAPI 라우터, 대기열·Fallback(queue_manager.py), 기록
+│   └── service/                 # [서비스] DB(SQLite)·이미지 저장, 대기 카드
+└── tests/                       # pytest
 ```
+
+---
+
+## 라이선스
+
+이 저장소의 코드는 [MIT License](LICENSE)를 따릅니다. 아래는 각자의 라이선스를 따르며 MIT 적용 대상이 아닙니다.
+
+- 모델 가중치 (저장소에 포함하지 않음): FLUX.2 klein-4B, Gemma 4 — 각 모델 카드의 라이선스
+- OpenAI API 출력: OpenAI 이용 약관
+- 글꼴 (`core/assets/fonts`, `frontend/public/fonts`): 주아·연성·고운바탕·고운돋움·검은고딕 — SIL Open Font License 1.1
+- 참고 사진 후보: Pixabay Content License
