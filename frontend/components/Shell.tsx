@@ -14,11 +14,12 @@ export function Logo() {
 /** 만들기 화면 공통 틀. 랜딩(/)은 자체 헤더를 씀 */
 export function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <>
+    // shell: 안에 .page-wide(결과 화면 2단)가 있으면 넓은 화면에서 틀을 넓힘 (globals.css)
+    <div className="shell">
       <header className="mx-auto max-w-3xl px-4 py-3">
         <Logo />
       </header>
       <main className="mx-auto max-w-3xl px-4 pb-24">{children}</main>
-    </>
+    </div>
   );
 }

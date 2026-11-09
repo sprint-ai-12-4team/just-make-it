@@ -3,7 +3,7 @@
 import { CutoutEditor } from "@/components/CutoutEditor";
 import { CopyKit } from "@/components/CopyKit";
 import { GenProgress } from "@/components/GenProgress";
-import { QrStamp } from "@/components/QrStamp";
+import { QrOverlay, QrStamp, type QrPreview } from "@/components/QrStamp";
 import { Shell } from "@/components/Shell";
 import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
@@ -13,7 +13,7 @@ import { canvasOf, placeOnScene } from "@/lib/cutout";
 import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
 import { drawText, FONTS, joinWords, loadCopies, loadFonts, POSITION_Y, saveCopies, splitWords, styleFor, TEXT_STYLES, type TextState, type WordState } from "@/lib/textStyles";
-import { ADJUSTMENTS, type Brief, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
+import { ADJUSTMENTS, IMAGE_MODELS, type Brief, type GenerateInput, type Generation, type ImageModel, type Purpose } from "@/lib/types";
 import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -84,6 +84,8 @@ function ResultPage() {
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
   const [brief, setBrief] = useState<Brief | null>(null);
+  const [qr, setQr] = useState<QrPreview | null>(null); // 저장 전 그림 위에 얹어 보는 QR
+  const [model, setModel] = useState<ImageModel | null>(null); // 다시 만들 때 그림 품질. null이면 처음 고른 것 (서버가 input에 안 돌려주면 빠르게)
   const composed = useRef(""); // 개발 모드에서 effect가 두 번 돌아도 한 번만 올림
 
   // 상담에서 왔으면 기획서의 채널·기간을 게시 문구 키트에 씀. 못 불러와도 그대로 동작
@@ -168,9 +170,10 @@ function ResultPage() {
   function remake(adjustments: string[]) {
     if (!g?.input) return;
     // 원본 사진은 서버가 parent_id로 다시 씀. 직접 고친 문구를 이어 씀 (g.input.message는 처음 입력값)
-    api.logEvent(g.id, "remake", { adjustments });
+    const image_model = model ?? g.input.image_model ?? IMAGE_MODELS[0].id;
+    api.logEvent(g.id, "remake", { adjustments, image_model });
     const message = edit?.text.trim() || g.message;
-    start({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
+    start({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id, image_model });
   }
 
   async function copyLink() {
@@ -265,6 +268,10 @@ function ResultPage() {
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
+      {/* 넓은 화면: 그림 왼쪽 고정 + 설정 오른쪽. 좁은 화면: 내리면 그림이 서서히 줄어듦 (globals.css .page-wide) */}
+      <div className={`page-wide flex flex-col gap-8 ${cutout ? "" : "lg:grid lg:grid-cols-2 lg:items-start lg:gap-10"}`}>
+      {/* 좁은 화면은 contents: 미리보기의 sticky가 페이지 전체 기준으로 동작하게 */}
+      <div className={`flex flex-col gap-4 max-lg:contents ${cutout ? "" : "lg:sticky lg:top-4"}`}>
       {cutout && g.background_url ? (
         <CutoutEditor
           photoUrl={g.background_url}
@@ -295,6 +302,7 @@ function ResultPage() {
                     covered?.boxes.map((b, i) => (
                       <div key={i} aria-hidden className="pointer-events-none absolute bg-ink/50" style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }} />
                     ))}
+                  {qr && <QrOverlay place={qr} ratio={g.height / g.width} onMove={setQr} />}
                 </div>
               ),
             },
@@ -304,7 +312,7 @@ function ResultPage() {
       )}
 
       {covered && !cutout && (
-        <div className="-mt-4 flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap max-lg:-mt-4 items-center gap-3">
           <button type="button" className="btn-line" aria-pressed={showCovered} onClick={() => setShowCovered(!showCovered)}>
             {showCovered ? <EyeOff aria-hidden className="size-5" /> : <Eye aria-hidden className="size-5" />}
             {showCovered ? "가려지는 곳 숨기기" : "올리면 가려지는 곳 보기"}
@@ -312,6 +320,9 @@ function ResultPage() {
           {showCovered && <p className="hint">{covered.label}</p>}
         </div>
       )}
+      </div>
+
+      <div className="flex min-w-0 flex-col gap-8">
 
       {/* 배경 지우는 중에는 저장·글자 고치기를 숨김: 미리보기가 배경 지우기 화면이라 눌러도 반영이 안 보임 */}
       {!cutout && (
@@ -385,7 +396,7 @@ function ResultPage() {
 
       {!cutout && (
         <>
-          <QrStamp base={() => (edit && canvasRef.current ? Promise.resolve(canvasRef.current) : loadImage(g.image_url))} onSave={saveQr} />
+          <QrStamp base={() => (edit && canvasRef.current ? Promise.resolve(canvasRef.current) : loadImage(g.image_url))} ratio={g.height / g.width} place={qr} onPlace={setQr} onSave={saveQr} />
           <CopyKit key={brief ? "brief" : "plain"} gid={g.id} text={edit?.text.trim() || g.message} productName={g.input?.product_name} brief={brief} />
         </>
       )}
@@ -402,6 +413,22 @@ function ResultPage() {
             ))}
           </div>
         </fieldset>
+        {g.input && (
+          <fieldset>
+            <legend className="label">그림 품질</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {IMAGE_MODELS.map((m) => {
+                const on = (model ?? g.input!.image_model ?? IMAGE_MODELS[0].id) === m.id;
+                return (
+                  <button key={m.id} type="button" aria-pressed={on} onClick={() => setModel(m.id)} className={`rounded-card border-2 p-4 text-left ${on ? "border-ink bg-pollen" : "border-mist bg-white hover:border-charcoal"}`}>
+                    <span className="block font-semibold">{m.title}</span>
+                    <span className="hint">{m.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <button type="button" className="btn-fill" disabled={!picked.length} onClick={() => remake(picked)}>
             고른 대로 다시 만들기
@@ -440,6 +467,8 @@ function ResultPage() {
       <Link href="/" className="btn-line">
         처음부터 새로 만들기
       </Link>
+      </div>
+      </div>
     </div>
   );
 }
