@@ -4,6 +4,10 @@
 > 본 프로젝트는 GCP L4 GPU 환경의 가성비와 OpenAI API의 안정성을 결합하여 대규모 트래픽(MAU) 대응이 가능한 광고 이미지 생성 아키텍처를 구축합니다.
 
 ---
+## Github Repository
+
+> [팀 저장소 바로가기](https://github.com/sprint-ai-12-4team/just-make-it)
+---
 
 ## 프로젝트 개요 및 핵심 아키텍처
 
