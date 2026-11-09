@@ -1,7 +1,6 @@
 # API 스펙 — just-make-it
 
-> 상태: **초안 (PM)**. 팀 리뷰 후 확정. 변경은 PR로 제안해 주세요.
-> 기준 코드: `frontend/lib/api.ts`, `core/pipeline.py`, `core/copywriter.py`, `core/prompt_builder.py`
+> 현재 구현(`serving/router.py`) 기준. 실행 중인 서버의 `/docs`(Swagger)에서도 볼 수 있습니다.
 
 ---
 

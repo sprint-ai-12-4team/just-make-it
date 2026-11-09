@@ -7,13 +7,34 @@
 
 ## 프로젝트 개요 및 핵심 아키텍처
 
-우리의 목표는 **비용 최적화**와 **무중단 서비스 보장**을 동시에 달성하는 것입니다.
+목표는 **비용 최적화**와 **끊기지 않는 서비스**를 함께 잡는 것입니다.
+
+```mermaid
+flowchart LR
+    U[사용자<br/>Next.js · Vercel] --> A[FastAPI<br/>GCP L4 VM]
+    A --> Q{GPU 대기열}
+    Q -->|여유 있음| L[로컬 모델<br/>FLUX.2 klein-4B · Gemma 4]
+    Q -->|가득 참 · 더 정교하게| O[OpenAI<br/>Image 2.5 · GPT-5.6]
+    L --> S[(SQLite + 디스크)]
+    O --> S
+```
 
 *   **기본 라우팅 (로컬 L4 GPU):** 일반적인 이미지 생성 요청은 자체 서빙 모델(FLUX.2 klein-4B)로 처리하여 비용을 `0원`으로 수렴시킵니다.
 *   **우회 라우팅 (OpenAI Fallback):** 로컬 GPU 대기 큐(Queue)가 가득 차거나 프리미엄 기능을 요청할 경우, `OpenAI Image 2.5 API`로 요청을 즉시 우회하여 유저 대기 시간을 최소화합니다.
 *   **문구:** 로컬 Gemma 4 12B, "더 자연스럽게"를 고르면 OpenAI GPT-5.6 Luna.
 
-⚠️ **하드웨어 제약 조건:** GCP g2-standard-4 인스턴스는 **시스템 RAM이 16GB**로 매우 제한적입니다. 모든 파트는 메모리 누수 방지 및 최적화 설정을 최우선으로 고려해야 합니다.
+**개발·운영 환경:** GCP `g2-standard-4` (NVIDIA L4 24GB VRAM, 시스템 RAM 16GB) 한 대에서 돌아가도록 설계했습니다. 작은 RAM에 맞춰 FP16 추론, 추론 후 VRAM 캐시 정리, 단일 워커(`--workers 1`) + 자체 대기열로 GPU 작업 수를 제한하고, OpenAI 비용은 일일 예산 상한으로 막습니다.
+
+---
+
+## 기술 스택
+
+| 영역 | 사용 기술 |
+|------|-----------|
+| 프론트엔드 | Next.js 15, React 19, TypeScript, Tailwind CSS, transformers.js(브라우저 배경 지우기) |
+| 백엔드 | Python 3.11, FastAPI, Pydantic, uv, SQLite |
+| 모델 | FLUX.2 klein-4B(diffusers), Gemma 4 12B, OpenAI Image 2.5 Flare · GPT-5.6 Luna |
+| 인프라 | Docker(멀티스테이지), Docker Compose, GitHub Actions, GCP Compute Engine(L4), Vercel |
 
 ---
 
@@ -76,6 +97,7 @@ Codeit LMS에 별도 파일로 제출합니다.
 | [`docs/product/user_flow.md`](docs/product/user_flow.md) | 유저 플로우 |
 | [`docs/product/model_selection.md`](docs/product/model_selection.md) | 모델 선택 근거 |
 | [`frontend/README.md`](frontend/README.md) | 프론트엔드 상세 |
+| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | 브랜치·리뷰·담당 영역 규칙 |
 | [`CLAUDE.md`](CLAUDE.md) | AI 코딩 에이전트용 규칙 (하드 제약·담당 영역) |
 
 ---
@@ -153,20 +175,14 @@ uv run pytest tests/ -v
 `main`·`dev` 브랜치에 push(PR 머지 포함)하면 GitHub Actions(`.github/workflows/cd.yml`)가 GCP L4 인스턴스에 자동 배포합니다. 프론트엔드는 Vercel에 배포됩니다.
 
 *   **배포 방식:** Docker 멀티 스테이지 빌드 기반 컨테이너 배포
-*   **실행 옵션:** 시스템 RAM 사수를 위해 인스턴스 내에서 반드시 `--workers 1` 및 GPU 옵션으로 격리 구동됩니다.
-*   **인프라 수칙:** 인스턴스 OS 단계에서 최소 16GB이상의 Swap Memory가 상시 활성화되어 있어야 합니다.
+*   **실행 옵션:** RAM 16GB에 맞춰 `--workers 1`, GPU를 할당한 컨테이너 하나로 구동합니다. 모델 로드 순간의 메모리 급증은 VM의 Swap(32GB)으로 흡수합니다.
 *   **모델 가중치:** 이미지에 포함하지 않고, 시작 시 캐시/볼륨에서 로드합니다.
 
 ---
 
-## 🤝 협업 가이드 (Git Branch Strategy)
+## 🤝 협업 방식
 
-*   `main`: 프로덕션 배포 브랜치 (직접 푸시 절대 금지)
-*   `dev`: 각 파트 통합 테스트 브랜치(PR은 이 브랜치에서만)
-*   `feature/{role}-{기능명}`: 각 파트별 작업 브랜치
-    *   예: `feature/model-scene-only`, `feature/serving-fallback-logic`, `feature/svc-fe-qr`
-*   **Code Review:** 모든 PR은 담당 파트 외 1명 이상의 승인(Approve) 후 머지합니다.
-*   담당 영역 밖의 코드는 직접 고치지 않고, 담당자에게 요청하거나 PR에서 승인을 받습니다.
+4인 팀이 역할별 폴더를 나눠 맡고, `feature/*` → `dev`(통합·배포) → `main` 흐름으로 PR 리뷰 후 머지했습니다. 자세한 규칙: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
 
 ---
 

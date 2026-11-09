@@ -150,6 +150,5 @@
 
 ## 7. 관련 문서
 
-- API 스펙: `docs/api_spec.md` (작성 예정)
-- 제품 결정 로그: `docs/private/decisions.md` (로컬 전용)
+- API 스펙: `docs/api_spec.md`
 - 전체 아키텍처: 루트 `README.md`
