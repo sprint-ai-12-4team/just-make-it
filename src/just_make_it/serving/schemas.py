@@ -366,6 +366,9 @@ class HealthResponse(BaseModel):
     fallback_model: str | None
     premium_model: str | None
     models_loading: bool
+    # 시작 웜업: off(설정으로 끔) · pending · running · done · skipped(mock, core 함수 없음) · failed
+    warmup: Literal["off", "pending", "running", "done", "skipped", "failed"] = "off"
+    warmup_seconds: float | None = None
     queue_length: int
     running: int
     estimated_wait_seconds: float

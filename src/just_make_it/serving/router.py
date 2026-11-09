@@ -213,6 +213,8 @@ async def health(request: Request) -> HealthResponse:
         fallback_model=manager.fallback.name if manager.fallback else None,
         premium_model=manager.premium.name if manager.premium else None,
         models_loading=manager.models_loading,
+        warmup=manager.warmup_state,
+        warmup_seconds=manager.warmup_seconds,
         queue_length=manager.queue_length,
         running=manager.running_count,
         estimated_wait_seconds=round(manager.estimated_wait_for_new_job(), 1),

@@ -256,6 +256,10 @@ class _Speeds:
         same_kind = [v for k, v in self._avg.items() if k[0] == key[0]]
         return sum(same_kind) / len(same_kind) if same_kind else self.init
 
+    def mark_warm(self, kind: str) -> None:
+        """서버 시작 때 웜업을 했으면 첫 호출도 평소 속도라 평균에 넣는다."""
+        self._warmed.add(kind)
+
     def add(self, key: tuple[str, str, bool], seconds: float) -> None:
         if key[0] not in self._warmed:
             self._warmed.add(key[0])
@@ -303,6 +307,9 @@ class QueueManager:
         self._active: dict[str, Job] = {}
         self._workers: list[asyncio.Task] = []
         self._loading: asyncio.Task | None = None
+        # 웜업 상태 (/health): off · pending · running · done · skipped · failed
+        self.warmup_state = "pending" if settings.warmup_on_start else "off"
+        self.warmup_seconds: float | None = None
         self._extra_tasks: set[asyncio.Task] = set()
         self._extra_slots = asyncio.Semaphore(EXTRA_CONCURRENCY)
 
@@ -351,6 +358,32 @@ class QueueManager:
                 "완료" if generator.is_ready else "실패",
                 generator.name,
             )
+            await self._warmup(generator)
+
+    async def _warmup(self, generator: ImageGenerator) -> None:
+        """불러온 직후 한 번 돌려 둔다. 그동안 들어온 요청은 모델 잠금에서 잠깐 기다림.
+
+        실패해도 서버는 그대로 (첫 요청이 느릴 뿐). mock·OpenAI, core에 웜업 함수가 없으면 skipped.
+        """
+        if not self.settings.warmup_on_start:
+            return
+        if not generator.is_ready:
+            self.warmup_state = "skipped"
+            return
+        self.warmup_state = "running"
+        try:
+            seconds = await asyncio.to_thread(generator.warmup)
+        except Exception:
+            self.warmup_state = "failed"
+            logger.exception("웜업 실패 (첫 요청이 느릴 수 있음): %s", generator.name)
+            return
+        if seconds is None:
+            self.warmup_state = "skipped"
+            return
+        self.warmup_state = "done"
+        self.warmup_seconds = seconds
+        self.speeds.mark_warm("primary")
+        logger.info("웜업 완료: %s (%.1f초)", generator.name, seconds)
 
     @property
     def models_loading(self) -> bool:
