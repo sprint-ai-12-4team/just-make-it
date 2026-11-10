@@ -29,13 +29,14 @@ class GemmaTextModel:
         self.timeout = timeout
         self.no_think = True
 
-    def generate(self, instructions, user_input, max_tokens=300):
+    def generate(self, instructions, user_input, max_tokens=300, json_schema=None):
         """지시문과 입력으로 글을 생성합니다.
 
         Args:
             instructions: 모델이 지켜야 할 규칙
             user_input: 사용자 입력
             max_tokens: 최대로 쓸 토큰 수
+            json_schema: 주면 그 JSON 모양으로만 답하게 함 (Ollama format)
 
         Returns:
             TextResult: 생성 결과
@@ -55,6 +56,8 @@ class GemmaTextModel:
         }
         if self.no_think:
             body["think"] = False
+        if json_schema is not None:
+            body["format"] = json_schema
 
         start = time.perf_counter()
         try:
@@ -71,7 +74,7 @@ class GemmaTextModel:
 
         if response.status_code == 400 and "think" in response.text and self.no_think:
             self.no_think = False
-            return self.generate(instructions, user_input, max_tokens)
+            return self.generate(instructions, user_input, max_tokens, json_schema)
         try:
             response.raise_for_status()
             text = response.json()["message"]["content"] or ""

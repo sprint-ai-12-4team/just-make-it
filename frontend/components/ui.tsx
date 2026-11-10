@@ -50,3 +50,16 @@ export function RiskyWords({ text }: { text: string }) {
     </FieldError>
   );
 }
+
+/** 상담 → 만들기 두 단계 표시 (service_consulting.md D). 상담을 거친 흐름에서만 보임 */
+export function Steps({ current }: { current: 1 | 2 }) {
+  return (
+    <ol aria-label="진행 단계" className="flex flex-wrap items-center gap-2 text-caption font-medium">
+      {["상담하기", "이미지 만들기"].map((t, i) => (
+        <li key={t} aria-current={current === i + 1 ? "step" : undefined} className={clsx("rounded-full px-4 py-1", current === i + 1 ? "bg-ink text-white" : "bg-mist text-graphite")}>
+          {i + 1}. {t}
+        </li>
+      ))}
+    </ol>
+  );
+}

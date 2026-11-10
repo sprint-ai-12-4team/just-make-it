@@ -76,6 +76,22 @@ class CoreGenerator(ImageGenerator):
         self._ready = True
         logger.info("이미지 모델 준비 완료: %s", self.name)
 
+    def warmup(self) -> float | None:
+        """core 웜업(`pipeline.warmup()`, 모델 쪽)을 부른다. 로컬(klein)만, OpenAI(detailed)는 안 부름.
+
+        core는 걸린 초를 돌려주고, 건너뛰거나(KLEIN_UNLOAD_AFTER_USE) 실패하면 기록만 하고 None
+        (예외를 내지 않음) → /health warmup은 skipped.
+        """
+        if self.image_quality != "fast" or not self._ready:
+            return None
+        from just_make_it.core import pipeline
+
+        warm = getattr(pipeline, "warmup", None)
+        if warm is None:
+            logger.info("core에 pipeline.warmup()이 없어 웜업 건너뜀")
+            return None
+        return warm()
+
     def generate(self, spec: GenerationSpec) -> GenerationOutput:
         from just_make_it.core import (
             ImageGenerationError,
@@ -98,6 +114,7 @@ class CoreGenerator(ImageGenerator):
                 seed=spec.seed,
                 image_quality=self.image_quality,
                 text_quality=spec.text_quality,
+                keep_product=spec.keep_product,
             )
         except ValueError as exc:
             # 입력 오류는 다시 시도하거나 다른 모델로 넘겨도 같은 결과
@@ -130,6 +147,7 @@ class CoreGenerator(ImageGenerator):
                 "text_fallback_reason": result.text_fallback_reason,
                 "product_source": result.product_source,
                 "used_reference": result.used_reference,
+                "keep_product": spec.keep_product,
                 "overlay_ms": int(round(result.overlay_sec * 1000)),
             },
         )

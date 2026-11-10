@@ -12,6 +12,9 @@ klein 생성이 뒤에서 끝까지 돌아 비용과 GPU를 씁니다.
 
 서빙이 Deadline을 걸지 않았으면(스크립트·테스트) 아무것도 바뀌지 않습니다.
 
+진행 상황도 같은 Deadline에 남깁니다 (서빙의 진행 막대용). 모델은 `report()`만 부르면 됩니다.
+- phase: text(문구·영어 묘사) → image(그림 모델). klein은 step/steps(1/4 … 4/4)도
+
 사용 (서빙):
     token = Deadline(90)
     with use_deadline(token):      # 생성을 돌리는 스레드 안에서
@@ -39,6 +42,24 @@ class Deadline:
     def __init__(self, seconds: float) -> None:
         self.expires_at = time.monotonic() + seconds
         self._cancelled = threading.Event()
+        # 진행 상황 (서빙이 읽기만 함). 모르면 None
+        self.phase: str | None = None
+        self.step: int | None = None
+        self.steps: int | None = None
+
+    def report(
+        self,
+        phase: str | None = None,
+        step: int | None = None,
+        steps: int | None = None,
+    ) -> None:
+        """지금 하는 일. phase를 바꾸면 step·steps는 새 값으로 (안 주면 None)."""
+        if phase is not None and phase != self.phase:
+            self.phase, self.step, self.steps = phase, None, None
+        if step is not None:
+            self.step = step
+        if steps is not None:
+            self.steps = steps
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -94,6 +115,15 @@ def timeout_for(default: float, what: str = "작업") -> float:
     return min(default, deadline.remaining())
 
 
+def report(
+    phase: str | None = None, step: int | None = None, steps: int | None = None
+) -> None:
+    """Deadline이 걸려 있으면 진행 상황을 남깁니다. 없으면 아무것도 하지 않습니다."""
+    deadline = current()
+    if deadline is not None:
+        deadline.report(phase, step, steps)
+
+
 def check(what: str = "작업") -> None:
     """Deadline이 걸려 있으면 확인합니다. 없으면 아무것도 하지 않습니다."""
     deadline = current()
@@ -127,17 +157,20 @@ def _seconds(timeout) -> float:
     return float(read) if isinstance(read, int | float) else 600.0
 
 
-def step_callback(what: str = "이미지 생성"):
+def step_callback(what: str = "이미지 생성", steps: int | None = None):
     """diffusers `callback_on_step_end`용 함수. Deadline이 없으면 None.
 
     매 단계 끝에 확인해서 시간이 다 됐거나 취소됐으면 예외로 생성을 멈춥니다 (GPU를 바로 놓아줌).
+    steps를 주면 끝난 단계 수도 남깁니다 (진행 막대 1/4 … 4/4).
     """
     deadline = current()
     if deadline is None:
         return None
+    deadline.report("image", step=0, steps=steps)
 
     def callback(pipe, step, timestep, callback_kwargs):
         deadline.check(what)
+        deadline.report(step=step + 1)
         return callback_kwargs
 
     return callback

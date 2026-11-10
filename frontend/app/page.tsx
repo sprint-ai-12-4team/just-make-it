@@ -2,7 +2,7 @@ import { SampleCard } from "@/components/SampleCard";
 import { SAMPLES } from "@/lib/samples";
 import { Logo } from "@/components/Shell";
 import { PURPOSES } from "@/lib/types";
-import { ArrowRight, Check, ChevronRight, MousePointerClick, PencilLine, Sparkles } from "lucide-react";
+import { ArrowRight, Check, ChevronRight, MessageCircle, MousePointerClick, PencilLine, Sparkles } from "lucide-react";
 import Link from "next/link";
 
 const TILT = ["-rotate-6", "rotate-3", "-rotate-2", "rotate-6"];
@@ -84,6 +84,14 @@ export default function Home() {
               </li>
             ))}
           </ul>
+          <Link href="/consult" className="mt-4 flex min-h-[96px] items-center gap-4 rounded-card bg-honey p-6 transition-colors hover:bg-pollen sm:p-8">
+            <MessageCircle aria-hidden className="size-7 shrink-0" />
+            <span className="flex-1">
+              <span className="block text-sub font-semibold">어디에, 뭐라고 올릴지 모르겠어요</span>
+              <span className="text-caption">AI에게 몇 가지만 답하면 올릴 곳과 문구를 정리해 드려요.</span>
+            </span>
+            <ChevronRight aria-hidden className="size-6 shrink-0" />
+          </Link>
         </section>
 
         <section id="how" className="bg-mist py-16">

@@ -86,3 +86,67 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_generation
     ON events (generation_id, type);
+
+-- [추가] AI 광고 상담 (api_spec_consult 3장). 대화 기록·칸·기획서를 한 행에 (상담 1번은 많아야 12턴)
+CREATE TABLE IF NOT EXISTS consults (
+    id            TEXT PRIMARY KEY,                 -- uuid4
+    client_id     TEXT NOT NULL,                    -- 만든 사람만 다시 열 수 있음
+    ip            TEXT,                             -- IP당 하루 상담 수 제한용
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    start_json    TEXT NOT NULL CHECK (json_valid(start_json)),     -- 시작할 때 받은 purpose, product_name
+    answers_json  TEXT NOT NULL CHECK (json_valid(answers_json)),   -- 칸별 답 {category, goal, ...}
+    messages_json TEXT NOT NULL CHECK (json_valid(messages_json)),  -- [{role, text, chips?}]
+    brief_json    TEXT CHECK (brief_json IS NULL OR json_valid(brief_json)),
+    turn          INTEGER NOT NULL DEFAULT 1,       -- 서버가 답한 횟수
+    off_topic     INTEGER NOT NULL DEFAULT 0,       -- 연속 주제 밖 횟수 (3이면 종료)
+    edits_left    INTEGER,                          -- 기획서를 더 고칠 수 있는 횟수
+    ended         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_consults_client
+    ON consults (client_id, created_at DESC);
+
+-- [추가] 텍스트 모델 호출 기록 (상담·문구 변환). 하루 횟수 제한과 OpenAI 금액(재시작해도 이어지게)
+CREATE TABLE IF NOT EXISTS text_calls (
+    id            INTEGER PRIMARY KEY,
+    kind          TEXT NOT NULL,                    -- consult_start, consult_turn, convert
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    model         TEXT,
+    source        TEXT,                             -- openai, local, none(모델 안 부름)
+    cost_usd      REAL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_text_calls_day
+    ON text_calls (kind, created_at);
+
+-- [추가] 악용 감지 기록 (상담 Moderation에 걸림·주제 밖 3번 연속 종료). 원문은 남기지 않음.
+-- events는 결과(generation_id)가 있어야 해서, 결과가 없는 상담 단계는 여기에 남김
+CREATE TABLE IF NOT EXISTS flags (
+    id            INTEGER PRIMARY KEY,
+    reason        TEXT NOT NULL,                    -- moderation, off_topic, advice_moderation, advice_off_topic
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    consult_id    TEXT REFERENCES consults(id),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_flags_client
+    ON flags (client_id, created_at);
+
+-- [추가] AI 광고 조언 자유 대화 (POST /advice). 대화 기록을 서버가 들고 있다가 core advisor에 넘김
+CREATE TABLE IF NOT EXISTS advices (
+    id            TEXT PRIMARY KEY,                 -- "a_" + uuid hex
+    client_id     TEXT NOT NULL,
+    ip            TEXT,
+    consult_id    TEXT,                             -- 상담 기획서를 context로 쓰면 그 상담 id
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    messages_json TEXT NOT NULL CHECK (json_valid(messages_json)),  -- [{role, text, chips?}]
+    turn          INTEGER NOT NULL DEFAULT 0,       -- 사장님이 보낸 글 수
+    off_topic     INTEGER NOT NULL DEFAULT 0,       -- 연속 주제 밖 수 (3이면 끝)
+    ended         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_advices_client
+    ON advices (client_id, created_at);

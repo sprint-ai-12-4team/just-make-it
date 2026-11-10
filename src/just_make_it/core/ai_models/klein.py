@@ -137,7 +137,7 @@ class KleinImageModel:
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         # 서빙이 제한 시간을 걸었으면 매 단계 확인해서 넘기면 바로 멈춤 (GPU를 놓아줌)
-        callback = deadline.step_callback(self.model)
+        callback = deadline.step_callback(self.model, steps=STEPS)
         if callback is not None:
             extra["callback_on_step_end"] = callback
         start = time.perf_counter()

@@ -17,6 +17,8 @@ Route = Literal["primary", "fallback", "premium"]
 # 프론트가 고르는 모델 (api_spec 1·3장). 화면에는 "빠르게 / 더 정교하게"로만 보인다
 ImageModel = Literal["flux2-klein-4b", "openai-image-2.5-flare"]
 TextModel = Literal["gemma-4-12b-it", "openai-gpt-5.6-luna"]
+# 참고 사진 출처: upload 직접 올림 · stock 프론트가 보여 준 Pixabay 후보에서 고름 (정량평가용)
+ReferenceSource = Literal["upload", "stock"]
 # 글자 고치기 값 (api_spec 5장 text_layout). core text_overlay의 POSITIONS·FONTS와 같다
 TextPosition = Literal["top", "middle", "bottom"]
 FontId = Literal["jua", "yeonsung", "batang", "dodum", "blackhan"]
@@ -65,6 +67,12 @@ class GenerateRequest(BaseModel):
     image_model: ImageModel = "flux2-klein-4b"
     # 영어 묘사·"텍스트 짧게"에 쓸 문구 모델. 비우면 서버 설정(GENERATE_TEXT_QUALITY)
     text_model: TextModel | None = None
+    # AI 상담에서 넘어왔으면 그 상담 id (상담한 경우 vs 안 한 경우 비교용, 결과 input에 남음)
+    consult_id: str | None = Field(default=None, max_length=64)
+    # 상품 사진 그대로, 배경 장면만 AI (api_spec_next 4장). 배경을 지운 PNG·WEBP가 필요
+    keep_product: bool = False
+    # 참고 사진 출처 (정량평가용): upload 직접 올림 · stock Pixabay에서 고름. 사진이 없으면 저장하지 않음
+    reference_source: ReferenceSource | None = None
 
     _strip = field_validator("product_name", "message", "style", mode="before")(
         _strip_text
@@ -117,6 +125,8 @@ class GenerateSuccessResponse(BaseModel):
     image_url: str
     # 글자 없는 원본. 글자 고치기는 서버가 여기에 다시 얹는다
     background_url: str | None = None
+    # keep_product일 때 배경이 투명한 상품 사진. 프론트가 장면(background_url) 위에 합침
+    product_url: str | None = None
     # 실제로 얹은 문구 ("텍스트 짧게"를 누르면 줄어든 문구)
     message: str
     text_layout: TextLayout | None = None
@@ -131,6 +141,13 @@ class GenerationInput(BaseModel):
     message: str
     style: str | None = None
     adjustments: list[str] = Field(default_factory=list)
+    consult_id: str | None = None
+    keep_product: bool = False
+    # 참고 사진 출처: upload · stock · None(사진 없음, 예전 결과)
+    reference_source: ReferenceSource | None = None
+    # 사용자가 고른 이미지 품질 (결과 화면 "다시 만들기"의 기본값). 예전 결과는 None.
+    # 실제로 쓴 모델은 응답의 source (빠르게를 골라도 대기가 길면 OpenAI로 갈 수 있음)
+    image_model: ImageModel | None = None
 
 
 class GenerationProgress(BaseModel):
@@ -140,8 +157,17 @@ class GenerationProgress(BaseModel):
     stage: Literal["queued", "running"]
     # 이 작업보다 먼저 처리될 작업 수 (대기 + 실행 중). 만드는 중이면 0
     jobs_ahead: int
-    # 끝날 때까지 남은 예상 시간(초). 대략적인 값이라 화면에는 "약 N초"로
+    # 끝날 때까지 남은 예상 시간(초). 대략적인 값이라 화면에는 "약 N초"로.
+    # 예상보다 늦어지면 0 + overdue=True
     estimated_seconds: float
+    # 접수 후 지난 시간(초). 프론트 막대는 이 값으로 그림 (새로고침·PC 시계 차이 무관)
+    elapsed_seconds: float | None = None
+    overdue: bool = False
+    # 지금 하는 일 (core가 알려 줌): text 문구·영어 묘사 / image 그림 / saving 저장. 모르면 None
+    phase: Literal["text", "image", "saving"] | None = None
+    # 그림 모델 단계 (klein: steps=4). OpenAI는 None
+    step: int | None = None
+    steps: int | None = None
 
 
 class GenerationResponse(BaseModel):
@@ -151,6 +177,8 @@ class GenerationResponse(BaseModel):
     status: Literal["processing", "success", "error"]
     image_url: str | None = None
     background_url: str | None = None
+    # keep_product일 때 배경이 투명한 상품 사진 (아니면 None)
+    product_url: str | None = None
     message: str | None = None
     # 글자 고치기 전 예전 결과·상세페이지 칸 이미지는 None
     text_layout: TextLayout | None = None
@@ -193,8 +221,18 @@ class FamilyResponse(BaseModel):
 
 # download 다운로드, copy_link 링크 복사, remake 다시 만들기, edit_text 글자 직접 고치기 시작,
 # cutout 배경 지우고 색 채우기 완료, pick_copy 추천 문구 고름 (api_spec_next 1)
+# + add_qr 그림에 QR, tip_click 대기 카드, copy_kit 게시 문구 복사 (api_spec_consult 5장).
+# flag(악용 감지)는 서버만 남기므로 여기 없음
 EventType = Literal[
-    "download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"
+    "download",
+    "copy_link",
+    "remake",
+    "edit_text",
+    "cutout",
+    "pick_copy",
+    "add_qr",
+    "tip_click",
+    "copy_kit",
 ]
 
 
@@ -207,6 +245,14 @@ class EventRequest(BaseModel):
     detail: dict | None = None
 
 
+class ReferenceStats(BaseModel):
+    """참고 사진 출처별 (upload · stock · none). generated가 0이면 비율은 None."""
+
+    generated: int
+    download_rate: float | None
+    remake_rate: float | None
+
+
 class DailyStats(BaseModel):
     date: str
     generated: int
@@ -216,6 +262,14 @@ class DailyStats(BaseModel):
     download_rate: float
     edit_rate: float
     remake_rate: float
+    # 정량평가 칸 (11-04 요청). mock 결과 제외, 계산할 결과가 없으면 None
+    seconds_p50: float | None = None  # 생성 시간(대기 포함) 중앙값
+    seconds_p95: float | None = None
+    local_rate: float | None = None  # 로컬 GPU로 만든 비율 (성공 중)
+    cost_usd: float | None = None  # OpenAI 비용 합 (성공·실패 모두)
+    cost_per_image_usd: float | None = None  # cost_usd / 성공 수
+    error_rate: float | None = None  # 실패 / (성공 + 실패)
+    by_reference: dict[str, ReferenceStats] | None = None
 
 
 class StatsResponse(BaseModel):
@@ -285,6 +339,8 @@ class DetailSection(BaseModel):
     body: str | None = None
     image_url: str | None = None
     source: Source | None = None
+    # processing인 칸만 (단일 이미지 progress와 같은 모양)
+    progress: GenerationProgress | None = None
 
 
 class DetailProgress(BaseModel):
@@ -310,6 +366,9 @@ class HealthResponse(BaseModel):
     fallback_model: str | None
     premium_model: str | None
     models_loading: bool
+    # 시작 웜업: off(설정으로 끔) · pending · running · done · skipped(mock, core 함수 없음) · failed
+    warmup: Literal["off", "pending", "running", "done", "skipped", "failed"] = "off"
+    warmup_seconds: float | None = None
     queue_length: int
     running: int
     estimated_wait_seconds: float
@@ -338,6 +397,14 @@ class GenerationSpec:
     text_quality: str = "basic"
     # 조금 수정하기 때 원본의 시드를 넘기면 구도가 유지된다 (klein만 적용, flare는 무시)
     seed: int | None = None
+    # AI 상담에서 넘어왔으면 그 상담 id (기록용)
+    consult_id: str | None = None
+    # 상품 없는 장면만 그림. reference_image는 상품(투명 PNG)으로 저장만 하고 모델에는 넣지 않음
+    keep_product: bool = False
+    # 참고 사진 출처 (기록용, upload · stock). 사진이 없으면 None
+    reference_source: str | None = None
+    # 사용자가 고른 이미지 품질 (기록용, input.image_model). 실제 경로는 submit의 premium이 정함
+    image_model: str | None = None
     # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
     # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
     output: Literal["combined", "image"] = "combined"
@@ -370,3 +437,155 @@ class GenerationOutput:
     text_layout: dict | None = None
     # DB params_json에 남길 재현·분석용 값 (text_model, product_source 등)
     params: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------- 대기 카드 (api_spec_consult 2장)
+class TipAction(BaseModel):
+    label: str
+    href: str
+
+
+class TipSource(BaseModel):
+    name: str
+    url: str
+
+
+class Tip(BaseModel):
+    id: str
+    kind: Literal["season", "howto", "platform", "law", "support", "news"]
+    title: str
+    body: str | None = None
+    action: TipAction | None = None
+    source: TipSource | None = None
+    checked_at: str | None = None
+
+
+class TipsResponse(BaseModel):
+    tips: list[Tip]
+
+
+# ---------------------------------------------------------------------- AI 상담 (api_spec_consult 3장)
+class ConsultStartRequest(BaseModel):
+    """POST /consults. 만들기 화면에서 넘어오면 채워서 보냄 (모두 선택)."""
+
+    purpose: Purpose | None = None
+    product_name: str | None = Field(default=None, max_length=50)
+
+    _strip = field_validator("product_name", mode="before")(_strip_text)
+
+
+CONSULT_TEXT_MAX = 500
+
+
+class AdviceRequest(BaseModel):
+    """POST /advice. advice_id가 없으면 새 대화. consult_id가 있으면 그 상담 기획서를 참고."""
+
+    advice_id: str | None = Field(default=None, max_length=64)
+    text: str
+    consult_id: str | None = Field(default=None, max_length=64)
+
+
+class AdviceResponse(BaseModel):
+    advice_id: str
+    reply: str
+    chips: list[str] = Field(default_factory=list)
+    # true면 프론트가 "이미지 만들러 가기" 버튼을 보여 줌
+    go_create: bool = False
+    ended: bool = False
+    turn: int
+    max_turns: int
+    # 이번 턴에 부른 모델: openai / local
+    source: Literal["openai", "local"] | None = None
+
+
+class ConsultMessageRequest(BaseModel):
+    """POST /consults/{id}/messages. 칩을 눌렀으면 칩 글자 그대로 + chip=true."""
+
+    text: str
+    chip: bool = False
+
+
+class Brief(BaseModel):
+    """광고 기획서 (프론트 lib/types.ts Brief와 같은 모양)."""
+
+    category: str
+    goal: str
+    product_name: str
+    period: str | None = None
+    strengths: list[str] = Field(default_factory=list)
+    audience: str
+    purpose: Purpose
+    channel: str
+    message: str
+    copies: list[str]
+    style: str | None = None
+    reason: str
+    next_tips: list[str] = Field(default_factory=list)
+
+
+class ConsultTurnResponse(BaseModel):
+    id: str
+    reply: str
+    chips: list[str]
+    allow_free_text: bool
+    turn: int
+    max_turns: int
+    brief: Brief | None = None
+    ended: bool = False
+    # 기획서를 더 고칠 수 있는 횟수 (기획서가 나오기 전에는 None)
+    edits_left: int | None = None
+    # 이번 턴에 부른 모델: openai / local. 모델을 안 불렀으면(칩·고정 질문) None
+    source: Literal["openai", "local"] | None = None
+
+
+class ConsultMessage(BaseModel):
+    role: Literal["assistant", "user"]
+    text: str
+    chips: list[str] | None = None
+
+
+class ConsultResponse(BaseModel):
+    """GET /consults/{id}. 새로고침했을 때 대화를 다시 보여 줌."""
+
+    id: str
+    messages: list[ConsultMessage]
+    brief: Brief | None = None
+    ended: bool = False
+    edits_left: int | None = None
+
+
+# ---------------------------------------------------------------------- 문구 변환 (api_spec_consult 4장)
+ConvertFormat = Literal[
+    "instagram_post",
+    "instagram_hashtags",
+    "instagram_location",
+    "instagram_story",
+    "naver_coupon",
+    "naver_blog_title",
+    "store_description",
+]
+CONVERT_TEXT_MAX = 300
+
+
+class ConvertRequest(BaseModel):
+    text: str
+    format: ConvertFormat
+    product_name: str | None = Field(default=None, max_length=50)
+    area: str | None = Field(default=None, max_length=30)
+    # 쿠폰 조건 등 사장님이 입력한 값. 모델은 여기 없는 숫자를 쓰지 않음
+    facts: dict[str, str] | None = None
+
+    _strip = field_validator("product_name", "area", mode="before")(_strip_text)
+
+
+class Coupon(BaseModel):
+    title: str
+    condition: str
+    period: str
+
+
+class ConvertResponse(BaseModel):
+    format: ConvertFormat
+    result: str | list[str] | Coupon
+    fixed_typos: bool
+    source: Literal["openai", "local"]

@@ -29,6 +29,9 @@ class ServingSettings(BaseSettings):
     generate_text_quality: Literal["basic", "natural"] = "basic"
     # 서버 시작 시 모델(klein)을 뒤에서 불러온다. 다 불러오기 전 요청은 Fallback으로 처리
     load_models_in_background: bool = True
+    # 모델을 불러온 뒤 core 웜업(pipeline.warmup)을 한 번 부른다 (배포 직후 첫 사용자가 오래 기다리지 않게).
+    # 웜업 중 들어온 요청은 잠깐 기다렸다가 로컬로 처리됨 (OpenAI로 넘기지 않음). core에 함수가 없으면 건너뜀
+    warmup_on_start: bool = True
     mock_delay_seconds: float = 2.0
 
     # ----- 기본 생성기 대기열 -----
@@ -52,6 +55,24 @@ class ServingSettings(BaseSettings):
     # OpenAI 하루 금액 상한(달러, 생성 기록의 cost_usd 합계). 넘으면 회로를 열어
     # OpenAI로 넘기지 않고 로컬 대기열에서 기다린다. 크레딧 $30 보호용 (0이면 끔)
     openai_daily_budget_usd: float = 3.0
+
+    # ----- AI 상담·문구 변환 (api_spec_consult 3·4장, 0이면 무제한) -----
+    consult_daily_limit: int = 3  # client당 하루 상담 시작 수
+    consult_ip_daily_limit: int = 10  # IP당 하루 상담 시작 수
+    # 상담 1회 최대 턴: 질문 7 + 기획서 수정 2 + 주제 밖 되돌림 여유
+    consult_max_turns: int = 12
+    convert_daily_limit: int = 20  # client당 하루 문구 변환 수
+    # AI 광고 조언 자유 대화 (POST /advice). 상담과 같은 규칙, 따로 셈
+    advice_daily_limit: int = 3  # client당 하루 새 대화 수
+    advice_ip_daily_limit: int = 10  # IP당 하루 새 대화 수
+    advice_max_turns: int = 12  # 대화 1개에서 사장님이 보낼 수 있는 글 수
+    # 하루 OpenAI 상한 중 상담·변환(텍스트)에 쓸 수 있는 비율. 넘으면 로컬 Gemma로
+    consult_budget_share: float = 0.33
+    # 상담·변환 한 번의 제한 시간(초)
+    text_task_timeout_seconds: float = 60.0
+    # IP 한도에 X-Forwarded-For 첫 값을 씀 (Vercel 프록시 뒤라 서버에는 프록시 IP만 보임).
+    # VM 주소로 직접 부르는 요청은 값을 꾸밀 수 있으니, 직접 공개하면 false
+    trust_forwarded_for: bool = True
 
     # ----- 타임아웃 -----
     # 생성 1건의 제한 시간(초). 넘으면 재시도 없이 Fallback 또는 실패 처리

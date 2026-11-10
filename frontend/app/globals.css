@@ -62,6 +62,37 @@ body {
   }
 }
 
+/* 결과 화면 (result/[id]) */
+@media (min-width: 1024px) {
+  /* 2단: 그림 왼쪽 고정. 만드는 중·오류 화면엔 .page-wide가 없어 그대로 좁게 */
+  .shell:has(.page-wide) > * {
+    max-width: 72rem;
+  }
+  .page-wide .preview {
+    max-height: calc(100vh - 8rem);
+  }
+}
+/* 1단(좁은 화면): 내리면 미리보기가 화면 높이 25%까지 서서히 줄고, 올리면 원래대로.
+   스크롤 연동 애니메이션 미지원 브라우저(Firefox 등)는 원래 크기 그대로 */
+@supports (animation-timeline: scroll()) {
+  @media (max-width: 1023px) {
+    .page-wide .preview {
+      animation: preview-shrink linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 50vh;
+    }
+    /* 그림이 줄 때 브라우저가 스크롤 위치를 되돌리며 떨리지 않게 */
+    html:has(.page-wide) {
+      overflow-anchor: none;
+    }
+  }
+}
+@keyframes preview-shrink {
+  to {
+    max-height: 25vh;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;

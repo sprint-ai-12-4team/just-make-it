@@ -61,6 +61,14 @@ class GenerationRecords:
                 "message": spec.message,
                 "style": spec.style,
                 "adjustments": spec.adjustments,
+                **({"image_model": spec.image_model} if spec.image_model else {}),
+                **({"consult_id": spec.consult_id} if spec.consult_id else {}),
+                **({"keep_product": True} if spec.keep_product else {}),
+                **(
+                    {"reference_source": spec.reference_source}
+                    if spec.reference_source
+                    else {}
+                ),
             },
             backend=backend,
             model=model,
@@ -78,8 +86,11 @@ class GenerationRecords:
         route: Route,
         queue_ms: int | None,
         image_ms: int | None,
+        product: bytes | None = None,
     ) -> dict:
         """이미지를 저장하고 성공으로 기록. 반환값은 api_spec의 조회 응답 모양.
+
+        product: keep_product일 때 받은 투명 상품 사진 (`{id}-product.png`, `product_url`)
 
         시간은 따로 기록한다: queue_ms 대기, output.text_ms 문구, image_ms 그림 모델.
         생성기 호출 전체 시간은 params의 run_ms.
@@ -92,6 +103,7 @@ class GenerationRecords:
             height=output.height,
             background=output.background_bytes,
             text_layout=output.text_layout,
+            product=product,
             params={**output.params, "fallback_reason": output.fallback_reason},
             backend=source,
             route=route,
@@ -132,7 +144,12 @@ class GenerationRecords:
                          '+9 hours', 'start of day', '-9 hours')""").fetchone()
         finally:
             conn.close()
-        return float(row[0] or 0)
+        # 상담·문구 변환에 쓴 금액도 같은 하루 상한에 들어감
+        return float(row[0] or 0) + db.text_cost_today()
+
+    def text_cost_today(self) -> float:
+        """오늘 상담·문구 변환에 쓴 OpenAI 금액 (텍스트 몫 상한용)."""
+        return db.text_cost_today()
 
     def seed_of(self, gid: str) -> int | None:
         """결과를 만들 때 쓴 시드 (조금 수정하기에서 구도 유지용). 없으면 None.
@@ -207,6 +224,91 @@ class GenerationRecords:
         )
         return [dict(row) for row in rows]
 
+    def eval_rows(self, days: int) -> list[dict]:
+        """정량평가 칸용 결과 1건씩 (GET /stats). 최근 days일, 단일 이미지, 끝난 것(success·error)만.
+
+        mock 결과는 뺌. 각 행: day, status, backend, seconds(대기+문구+이미지),
+        cost_usd, reference(upload·stock·none), downloaded, remade
+        """
+        rows = self._read(
+            """SELECT date(g.created_at, '+9 hours') AS day, g.status, g.backend,
+                      (COALESCE(g.queue_ms, 0) + COALESCE(g.text_ms, 0)
+                       + COALESCE(g.image_ms, 0)) / 1000.0 AS seconds,
+                      g.image_ms IS NOT NULL AS timed,
+                      g.cost_usd,
+                      COALESCE(json_extract(g.input_json, '$.reference_source'), 'none')
+                          AS reference,
+                      EXISTS(SELECT 1 FROM events e WHERE e.generation_id = g.id
+                             AND e.type IN ('download', 'copy_link')) AS downloaded,
+                      EXISTS(SELECT 1 FROM generations c WHERE c.parent_id = g.id)
+                          AS remade
+                 FROM generations g
+                WHERE g.status IN ('success', 'error') AND g.detail_page_id IS NULL
+                  AND g.backend != 'mock'
+                  AND g.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now',
+                        '+9 hours', 'start of day', ?, '-9 hours')
+                ORDER BY g.created_at""",
+            (f"-{max(0, days - 1)} days",),
+        )
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ 상담·텍스트 호출
+    def start_consult(
+        self, client_id: str, ip: str | None, start: dict, first_message: dict
+    ) -> str:
+        return db.start_consult(client_id, ip, start, first_message)
+
+    def get_consult(self, cid: str) -> dict | None:
+        return db.get_consult(cid)
+
+    def save_consult(self, consult: dict) -> None:
+        db.save_consult(consult)
+
+    def start_advice(
+        self, client_id: str, ip: str | None, consult_id: str | None, advice: dict
+    ) -> str:
+        return db.start_advice(client_id, ip, consult_id, advice)
+
+    def get_advice(self, aid: str) -> dict | None:
+        return db.get_advice(aid)
+
+    def save_advice(self, advice: dict) -> None:
+        db.save_advice(advice)
+
+    def add_text_call(
+        self,
+        kind: str,
+        client_id: str,
+        ip: str | None,
+        *,
+        model: str | None = None,
+        source: str | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
+        db.add_text_call(
+            kind, client_id, ip, model=model, source=source, cost_usd=cost_usd
+        )
+
+    def count_text_calls(
+        self, kind: str, *, client_id: str | None = None, ip: str | None = None
+    ) -> int:
+        return db.count_text_calls(kind, client_id=client_id, ip=ip)
+
+    def add_flag(
+        self,
+        reason: str,
+        client_id: str,
+        ip: str | None,
+        *,
+        consult_id: str | None = None,
+    ) -> None:
+        db.add_flag(reason, client_id, ip, consult_id=consult_id)
+
+    def count_flags(
+        self, *, client_id: str | None = None, ip: str | None = None
+    ) -> int:
+        return db.count_flags(client_id=client_id, ip=ip)
+
     # ------------------------------------------------------------------ 상세페이지
     def start_detail_page(self, client_id: str, input: dict) -> str:
         return db.start_detail_page(client_id, input)
@@ -265,6 +367,11 @@ class GenerationRecords:
         path = self._reference_path(gid)
         if path is not None:
             path.write_bytes(data)
+
+    def reference_source(self, gid: str) -> str | None:
+        """원본 결과의 참고 사진 출처 (다시 만들기에서 이어 씀). 없으면 None."""
+        row = db.get_generation(gid)
+        return ((row or {}).get("input") or {}).get("reference_source")
 
     def load_reference(self, gid: str) -> bytes | None:
         path = self._reference_path(gid)

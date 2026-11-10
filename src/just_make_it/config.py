@@ -12,6 +12,9 @@ load_dotenv()
 # 빠르게/기본은 VM의 로컬 모델, 더 정교하게/더 자연스럽게는 OpenAI API 모델
 GEMMA_MODEL = "gemma4:12b-it-qat"
 LUNA_MODEL = "gpt-5.6-luna"
+# 상담 기획서처럼 판단이 필요한 곳에만 쓰는 더 큰 텍스트 모델 (luna의 약 10배 가격)
+TERRA_MODEL = "gpt-5.6-terra"
+MODERATION_MODEL = "omni-moderation-latest"
 KLEIN_MODEL = "black-forest-labs/FLUX.2-klein-4B"
 KLEIN_FP8_REPO = "black-forest-labs/FLUX.2-klein-4b-fp8"
 KLEIN_FP8_FILE = "flux-2-klein-4b-fp8.safetensors"
@@ -47,3 +50,5 @@ FLARE_PRICE_IMAGE_INPUT = 8.0
 FLARE_PRICE_OUTPUT = 30.0
 LUNA_PRICE_INPUT = 0.20
 LUNA_PRICE_OUTPUT = 1.20
+TERRA_PRICE_INPUT = 2.00
+TERRA_PRICE_OUTPUT = 12.00

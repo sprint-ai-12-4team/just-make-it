@@ -10,6 +10,14 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
+from .assistant import (
+    AdviceEndedError,
+    AdviceNotFoundError,
+    AssistantService,
+    ConsultEndedError,
+    ConsultNotFoundError,
+    ModerationError,
+)
 from .copywriter import CopyInputError, CopyWriter
 from .detail_pages import (
     DetailPageBusyError,
@@ -27,8 +35,18 @@ from .queue_manager import (
 )
 from .records import GenerationRecords
 from .schemas import (
+    CONSULT_TEXT_MAX,
+    CONVERT_TEXT_MAX,
     IMAGE_QUALITY,
     TEXT_QUALITY,
+    AdviceRequest,
+    AdviceResponse,
+    ConsultMessageRequest,
+    ConsultResponse,
+    ConsultStartRequest,
+    ConsultTurnResponse,
+    ConvertRequest,
+    ConvertResponse,
     CopiesRequest,
     CopiesResponse,
     DetailPageRequest,
@@ -43,10 +61,12 @@ from .schemas import (
     GenerationStarted,
     HealthResponse,
     JobState,
+    Purpose,
     SectionRegenerateRequest,
     SectionRegenerateStarted,
     StatsResponse,
     TextEditRequest,
+    TipsResponse,
 )
 from .settings import ServingSettings
 
@@ -72,6 +92,12 @@ MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 �
 MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
 MSG_EVENT_BAD = "기록할 수 없는 요청이에요."
+MSG_KEEP_PRODUCT_PHOTO = "상품 그대로 쓰려면 배경을 지운 상품 사진을 올려 주세요."
+MSG_KEEP_PRODUCT_CUTOUT = (
+    "배경이 투명한 사진(PNG·WEBP)만 상품 그대로 쓸 수 있어요. 먼저 배경을 지워 주세요."
+)
+# 투명한 칸이 이만큼은 있어야 배경을 지운 사진으로 본다 (거의 투명한 픽셀 비율)
+CUTOUT_MIN_TRANSPARENT = 0.05
 
 
 def _json_body_doc(model, example: dict) -> dict:
@@ -155,6 +181,19 @@ def _detail_pages(request: Request) -> DetailPageService:
     return request.app.state.detail_pages
 
 
+def _assistant(request: Request) -> AssistantService:
+    return request.app.state.assistant
+
+
+def _client_ip(request: Request) -> str | None:
+    """IP당 한도용. Vercel 프록시 뒤라 X-Forwarded-For 첫 값 (설정으로 끌 수 있음)."""
+    if _settings(request).trust_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded.strip():
+            return forwarded.split(",")[0].strip()[:64]
+    return request.client.host if request.client else None
+
+
 def _client_id(value: str | None) -> str:
     value = (value or "").strip()
     return value[:64] if value else "anonymous"
@@ -174,6 +213,8 @@ async def health(request: Request) -> HealthResponse:
         fallback_model=manager.fallback.name if manager.fallback else None,
         premium_model=manager.premium.name if manager.premium else None,
         models_loading=manager.models_loading,
+        warmup=manager.warmup_state,
+        warmup_seconds=manager.warmup_seconds,
         queue_length=manager.queue_length,
         running=manager.running_count,
         estimated_wait_seconds=round(manager.estimated_wait_for_new_job(), 1),
@@ -222,7 +263,7 @@ async def copies(request: Request) -> CopiesResponse:
     "/generate",
     response_model=GenerateSuccessResponse,
     responses={
-        400: {"description": "필수값 누락"},
+        400: {"description": "필수값 누락, keep_product인데 배경을 지운 사진이 없음"},
         413: {"description": "사진 10MB 초과"},
         415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
         429: {"description": "하루 생성 한도 초과"},
@@ -243,6 +284,8 @@ async def generate(
       `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
     - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록)
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
+    - `keep_product`: 상품 사진(배경을 지운 PNG·WEBP) 그대로, 서버는 상품 없는 장면만 그린다.
+      글자는 위쪽, 응답의 `product_url`(받은 상품 사진)을 프론트가 장면 가운데 아래에 합친다
     - 기다리는 동안 진행 상황을 보여주려면 같은 본문으로 `POST /generations`(202 + 조회)를 쓴다
     """
     settings = _settings(request)
@@ -264,7 +307,7 @@ async def generate(
     status_code=202,
     response_model=GenerationStarted,
     responses={
-        400: {"description": "필수값 누락"},
+        400: {"description": "필수값 누락, keep_product인데 배경을 지운 사진이 없음"},
         413: {"description": "사진 10MB 초과"},
         415: {"description": "PNG·JPG·WEBP가 아닌 사진"},
         429: {"description": "하루 생성 한도 초과"},
@@ -301,6 +344,9 @@ async def _submit_generation(request: Request, x_client_id: str | None):
     body, reference = await _parse_form_body(request, settings)
     payload = _validate(GenerateRequest, body)
     _check_lengths(payload, settings)
+    uploaded = reference is not None
+    reference = await _product_photo(request, payload, reference)
+    source = await _reference_source(request, payload, uploaded)
 
     manager = _manager(request)
     spec = GenerationSpec(
@@ -310,6 +356,10 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         style=payload.style,
         adjustments=payload.adjustments,
         reference_image=reference,
+        consult_id=payload.consult_id,
+        keep_product=payload.keep_product,
+        reference_source=source,
+        image_model=payload.image_model,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model
@@ -329,6 +379,55 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         raise HTTPException(status_code=503, detail=MSG_BUSY) from exc
     except DailyLimitError as exc:
         raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+
+
+async def _reference_source(
+    request: Request, payload: GenerateRequest, uploaded: bool
+) -> str | None:
+    """참고 사진 출처 (정량평가용). 이번에 사진을 올렸으면 보낸 값, 사진 없이 `upload`·`stock`이면 None.
+
+    다시 만들기(`parent_id`)에서 사진을 안 보내면 원본 사진을 다시 쓰므로 원본의 값을 이어 씀.
+    """
+    if uploaded:
+        return payload.reference_source
+    if payload.parent_id:
+        return await asyncio.to_thread(
+            _records(request).reference_source, payload.parent_id
+        )
+    return None
+
+
+async def _product_photo(
+    request: Request, payload: GenerateRequest, reference: bytes | None
+) -> bytes | None:
+    """keep_product면 배경을 지운 상품 사진을 확인한다 (api_spec_next 4장).
+
+    다시 만들기(`parent_id`)에서 사진을 안 보내면 원본의 사진을 쓴다. 없거나 투명한 곳이 없으면 400.
+    """
+    if not payload.keep_product:
+        return reference
+    if reference is None and payload.parent_id:
+        reference = await asyncio.to_thread(
+            _records(request).load_reference, payload.parent_id
+        )
+    if reference is None:
+        raise HTTPException(status_code=400, detail=MSG_KEEP_PRODUCT_PHOTO)
+    if not _is_cutout(reference):
+        raise HTTPException(status_code=400, detail=MSG_KEEP_PRODUCT_CUTOUT)
+    return reference
+
+
+def _is_cutout(png: bytes) -> bool:
+    """배경을 지운 사진인지: 알파 채널이 있고 거의 투명한 픽셀이 CUTOUT_MIN_TRANSPARENT 이상."""
+    try:
+        image = Image.open(io.BytesIO(png))
+        if image.mode != "RGBA":
+            return False
+        histogram = image.getchannel("A").histogram()
+    except (UnidentifiedImageError, OSError):
+        return False
+    total = sum(histogram)
+    return bool(total) and sum(histogram[:16]) / total >= CUTOUT_MIN_TRANSPARENT
 
 
 def _image_size(purpose: str) -> tuple[int, int]:
@@ -428,12 +527,68 @@ async def stats(
     - `generated` 성공한 결과 수, `downloaded` 다운로드·링크 복사된 수,
       `edited` 글자 직접 고치기·배경 지우기를 한 수, `remade` 다시 만들기·조금 수정하기의 원본이 된 수
     - `*_rate`는 generated 대비 비율
+    - 정량평가 칸 (mock 결과 제외, 계산할 결과가 없으면 null): `seconds_p50`·`seconds_p95` 생성 시간
+      (대기+문구+이미지), `local_rate` 로컬 GPU 비율, `cost_usd` OpenAI 비용 합, `cost_per_image_usd`,
+      `error_rate` 실패 / (성공+실패), `by_reference` 참고 사진 출처별(upload·stock·none)
+      `{generated, download_rate, remake_rate}`
     """
-    rows = await asyncio.to_thread(_records(request).adoption_stats, days)
-    daily = [_with_rates(row["day"], row) for row in rows]
+    records = _records(request)
+    rows = await asyncio.to_thread(records.adoption_stats, days)
+    evals = await asyncio.to_thread(records.eval_rows, days)
+    daily = [
+        {
+            **_with_rates(row["day"], row),
+            **_eval_fields([e for e in evals if e["day"] == row["day"]]),
+        }
+        for row in rows
+    ]
     keys = ("generated", "downloaded", "edited", "remade")
-    total = _with_rates("total", {k: sum(row[k] for row in rows) for k in keys})
+    total = {
+        **_with_rates("total", {k: sum(row[k] for row in rows) for k in keys}),
+        **_eval_fields(evals),
+    }
     return StatsResponse(days=daily, total=total)
+
+
+REFERENCE_KEYS = ("upload", "stock", "none")
+
+
+def _eval_fields(rows: list[dict]) -> dict:
+    """정량평가 칸 (api_spec "/stats 정량평가 추가 칸"). rows는 records.eval_rows (mock 제외)."""
+    done = [r for r in rows if r["status"] == "success"]
+    seconds = sorted(r["seconds"] for r in done if r["timed"])
+    cost = sum(r["cost_usd"] or 0.0 for r in rows)
+
+    def ratio(part: int, whole: int) -> float | None:
+        return round(part / whole, 3) if whole else None
+
+    by_reference = {}
+    for key in REFERENCE_KEYS:
+        mine = [r for r in done if r["reference"] == key]
+        by_reference[key] = {
+            "generated": len(mine),
+            "download_rate": ratio(sum(bool(r["downloaded"]) for r in mine), len(mine)),
+            "remake_rate": ratio(sum(bool(r["remade"]) for r in mine), len(mine)),
+        }
+    return {
+        "seconds_p50": _percentile(seconds, 0.5),
+        "seconds_p95": _percentile(seconds, 0.95),
+        "local_rate": ratio(sum(r["backend"] == "local" for r in done), len(done)),
+        "cost_usd": round(cost, 4) if rows else None,
+        "cost_per_image_usd": round(cost / len(done), 4) if done else None,
+        "error_rate": ratio(len(rows) - len(done), len(rows)),
+        "by_reference": by_reference,
+    }
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    """정렬된 값의 q 분위수 (선형 보간). 값이 없으면 None."""
+    if not values:
+        return None
+    pos = (len(values) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(values) - 1)
+    return round(values[low] + (values[high] - values[low]) * (pos - low), 1)
 
 
 def _with_rates(day: str, row: dict) -> dict:
@@ -667,6 +822,277 @@ async def _read_edited_png(
     return data
 
 
+# ---------------------------------------------------------------------- /tips
+@router.get("/tips", response_model=TipsResponse)
+async def tips(
+    purpose: Purpose | None = None,
+    category: str | None = Query(default=None, max_length=20),
+    limit: int = Query(default=6, ge=1, le=12),
+) -> JSONResponse:
+    """대기 중 정보 카드 (api_spec_consult 2장). 모델 호출 없음.
+
+    - 고르는 순서: 다가오는 시즌(21일 안) → `purpose`·`category`가 맞는 카드 → 후가공 요령·광고 법
+    - `category`: cafe · restaurant · beauty · flower · fashion · etc (모르는 값은 무시)
+    - 카드를 누르면 `POST /events` `type="tip_click"`, `detail={"tip_id": ...}`
+    """
+    from just_make_it.service.tips import CATEGORIES, pick_tips
+
+    picked = pick_tips(
+        purpose, category if category in CATEGORIES else None, limit=limit
+    )
+    body = TipsResponse(tips=picked).model_dump(mode="json")
+    return JSONResponse(body, headers={"Cache-Control": "max-age=600"})
+
+
+# ---------------------------------------------------------------------- /consults
+CONSULT_ERRORS = {
+    400: {"description": "빈 답, 또는 Moderation에 걸린 글"},
+    404: {"description": "없는 상담 (다른 사람의 상담도 404)"},
+    409: {"description": "이미 끝난 상담"},
+    413: {"description": "답이 500자 초과"},
+    429: {"description": "오늘 상담 횟수 초과"},
+    503: {"description": "모델 응답 없음 (로컬 대체도 실패)"},
+}
+MSG_CONSULT_NOT_FOUND = "상담을 찾을 수 없어요."
+MSG_CONSULT_ENDED = "상담이 끝났어요. 바로 만들기로 이어 갈 수 있어요."
+MSG_CONSULT_LIMIT = "오늘 상담 횟수를 다 썼어요. 바로 만들기는 계속 쓸 수 있어요."
+MSG_MODERATION = "광고와 관련된 내용으로 다시 말씀해 주세요."
+MSG_CONVERT_LIMIT = "오늘 바꿀 수 있는 횟수를 다 썼어요."
+
+
+@router.post(
+    "/consults",
+    status_code=201,
+    response_model=ConsultTurnResponse,
+    responses={429: CONSULT_ERRORS[429]},
+    openapi_extra={
+        "requestBody": {
+            **_json_body_doc(
+                ConsultStartRequest, {"purpose": "instagram", "product_name": "소금빵"}
+            ),
+            "required": False,
+        }
+    },
+)
+async def start_consult(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> ConsultTurnResponse:
+    """AI 광고 상담 시작 (api_spec_consult 3-1). 첫 질문은 고정 문구라 모델을 부르지 않음.
+
+    - 질문은 고정 문구 + 칩. 칩을 누르면 모델을 안 부르고, 직접 쓴 답만 luna가 칸에 정리
+    - 칸이 다 차면 terra 1번으로 기획서(`brief`). 기획서는 2번까지 고칠 수 있음 (`edits_left`)
+    - 하루 client 3회 · IP 10회 (`429`)
+    """
+    body = await _read_json(request) if await request.body() else {}
+    payload = _validate(ConsultStartRequest, body)
+    try:
+        turn = await _assistant(request).start_consult(
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.model_dump(exclude_none=True),
+        )
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_CONSULT_LIMIT) from exc
+    return ConsultTurnResponse.model_validate(turn)
+
+
+@router.post(
+    "/consults/{consult_id}/messages",
+    response_model=ConsultTurnResponse,
+    responses=CONSULT_ERRORS,
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            ConsultMessageRequest, {"text": "카페", "chip": True}
+        )
+    },
+)
+async def send_consult(
+    request: Request,
+    consult_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> ConsultTurnResponse:
+    """상담에 답하기 (api_spec_consult 3-2). 대화 기록은 서버에 있어서 새 답만 보냄.
+
+    - 주제 밖 질문은 `200`으로 정중히 되돌림. 같은 상담에서 3번 연속이면 `ended: true`
+    - Moderation에 걸리면 `400` (턴은 세지만 모델은 부르지 않고 글도 남기지 않음)
+    - 기획서가 나온 뒤 보내는 글은 "이렇게 고쳐 주세요"로 받아 기획서를 고침
+    """
+    body = await _read_json(request)
+    if isinstance(body.get("text"), str) and not body["text"].strip():
+        raise HTTPException(status_code=400, detail="답을 입력해 주세요.")
+    payload = _validate(ConsultMessageRequest, body)
+    if len(payload.text) > CONSULT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"답은 {CONSULT_TEXT_MAX}자 이하로 적어 주세요."
+        )
+    try:
+        turn = await _assistant(request).send(
+            consult_id,
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text,
+            payload.chip,
+        )
+    except ConsultNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_CONSULT_NOT_FOUND) from exc
+    except ConsultEndedError as exc:
+        raise HTTPException(status_code=409, detail=MSG_CONSULT_ENDED) from exc
+    except ModerationError as exc:
+        raise HTTPException(status_code=400, detail=MSG_MODERATION) from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return ConsultTurnResponse.model_validate(turn)
+
+
+@router.get(
+    "/consults/{consult_id}",
+    response_model=ConsultResponse,
+    responses={404: CONSULT_ERRORS[404]},
+)
+async def get_consult(
+    request: Request,
+    consult_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> ConsultResponse:
+    """상담 다시 열기 (api_spec_consult 3-3). 만든 사람(`X-Client-Id`)만 볼 수 있음."""
+    try:
+        consult = await _assistant(request).get_consult(
+            consult_id, _client_id(x_client_id)
+        )
+    except ConsultNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_CONSULT_NOT_FOUND) from exc
+    return ConsultResponse.model_validate(consult)
+
+
+# ---------------------------------------------------------------------- /advice
+MSG_ADVICE_NOT_FOUND = "대화를 찾을 수 없어요. 새로 물어봐 주세요."
+MSG_ADVICE_ENDED = "대화가 끝났어요. 새로 물어보거나 바로 만들기로 이어 갈 수 있어요."
+MSG_ADVICE_LIMIT = "오늘 조언 대화 횟수를 다 썼어요. 바로 만들기는 계속 쓸 수 있어요."
+
+
+@router.post(
+    "/advice",
+    response_model=AdviceResponse,
+    responses={
+        400: {"description": "빈 글, 또는 Moderation에 걸린 글"},
+        404: {"description": "없는 대화 (다른 사람의 대화도 404)"},
+        409: {"description": "끝난 대화 (턴 수를 다 씀, 주제 밖 3번)"},
+        413: {"description": "글이 500자 초과"},
+        429: {"description": "오늘 새 대화 횟수 초과 (client 3회 · IP 10회)"},
+        503: {
+            "description": "모델 응답 없음 (로컬 대체도 실패). 프론트는 기본 안내로 대체"
+        },
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            AdviceRequest,
+            {"advice_id": None, "text": "손님이 동네 주민인데 어디에 올려요?"},
+        )
+    },
+)
+async def advice(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> AdviceResponse:
+    """AI 광고 조언 자유 대화 (core `advisor.advise`, terra). 대화 기록은 서버가 들고 있음.
+
+    - `advice_id`가 없으면 새 대화 (첫 답이 나온 뒤 저장, 모델이 실패하면 횟수도 안 셈)
+    - `consult_id`가 내 상담이면 그 기획서를 참고해서 답함 (남의 상담은 무시)
+    - `go_create: true`면 프론트가 "이미지 만들러 가기"를 보여 줌
+    - 상담과 같은 규칙: 하루 새 대화 수·턴 수(12)·Moderation·주제 밖 3번 연속 종료·텍스트 금액 몫
+    """
+    body = await _read_json(request)
+    if isinstance(body.get("text"), str) and not body["text"].strip():
+        raise HTTPException(status_code=400, detail="물어볼 내용을 적어 주세요.")
+    payload = _validate(AdviceRequest, body)
+    if len(payload.text) > CONSULT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"{CONSULT_TEXT_MAX}자 이하로 적어 주세요."
+        )
+    try:
+        turn = await _assistant(request).advise(
+            payload.advice_id,
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text,
+            payload.consult_id,
+        )
+    except AdviceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=MSG_ADVICE_NOT_FOUND) from exc
+    except AdviceEndedError as exc:
+        raise HTTPException(status_code=409, detail=MSG_ADVICE_ENDED) from exc
+    except ModerationError as exc:
+        raise HTTPException(status_code=400, detail=MSG_MODERATION) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_ADVICE_LIMIT) from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return AdviceResponse.model_validate(turn)
+
+
+# ---------------------------------------------------------------------- /copies/convert
+@router.post(
+    "/copies/convert",
+    response_model=ConvertResponse,
+    responses={
+        400: {"description": "빈 문구, 모르는 format"},
+        413: {"description": "문구 300자 초과"},
+        429: {"description": "오늘 변환 횟수 초과 (client 20회)"},
+        503: {"description": "모델 응답 없음 (로컬 대체도 실패)"},
+    },
+    openapi_extra={
+        "requestBody": _json_body_doc(
+            ConvertRequest,
+            {
+                "text": "주말 한정 소금빵 10% 할인",
+                "format": "instagram_hashtags",
+                "product_name": "소금빵",
+                "area": "망원동",
+                "facts": {"discount": "10%", "until": "11월 30일"},
+            },
+        )
+    },
+)
+async def convert_copy(
+    request: Request, x_client_id: str | None = Header(default=None)
+) -> ConvertResponse:
+    """고른 광고 문구를 채널별로 올릴 글로 바꿈 (api_spec_consult 4장, 게시 문구 키트).
+
+    - 오타·띄어쓰기를 먼저 정리 (`fixed_typos`)
+    - 할인율·가격·날짜는 문구와 `facts`에 있는 것만. 모델이 지어내면 서버가 빼고 돌려줌
+    - luna로 만들고, 하루 OpenAI 상한을 넘으면 로컬 Gemma (`source: "local"`)
+    """
+    from just_make_it.core.copy_convert import FORMATS
+
+    body = await _read_json(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="바꿀 문구를 입력해 주세요.")
+    if body.get("format") not in FORMATS:
+        raise HTTPException(status_code=400, detail="지원하지 않는 형식이에요.")
+    if len(text.strip()) > CONVERT_TEXT_MAX:
+        raise HTTPException(
+            status_code=413, detail=f"문구는 {CONVERT_TEXT_MAX}자 이하로 보내 주세요."
+        )
+    payload = _validate(ConvertRequest, body)
+    try:
+        result = await _assistant(request).convert(
+            _client_id(x_client_id),
+            _client_ip(request),
+            payload.text.strip(),
+            payload.format,
+            payload.product_name,
+            payload.area,
+            payload.facts,
+        )
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_CONVERT_LIMIT) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="입력값을 확인해 주세요.") from exc
+    except (GeneratorError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=ERROR_GENERIC) from exc
+    return ConvertResponse.model_validate(result)
+
+
 # ---------------------------------------------------------------------- /detail-pages
 @router.post(
     "/detail-pages",
@@ -723,6 +1149,10 @@ async def get_detail_page(request: Request, page_id: str) -> DetailPageResponse:
     page = await asyncio.to_thread(_records(request).get_detail_page, page_id)
     if page is None:
         raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    progress = _manager(request).section_progress(page_id)
+    for section in page["sections"]:
+        if section["status"] == "processing":
+            section["progress"] = progress.get(section["index"])
     return DetailPageResponse.model_validate(page)
 
 

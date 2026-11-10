@@ -7,6 +7,9 @@
   조회: get_generation, get_detail_page / 제한: count_today, has_running_detail_page
   글자 고치기: background(원본 바이트) → (core render_text) → update_text
   고친 그림 저장: replace_image (api_spec_next 2) / 같은 원본 목록: family (3) / 사용 기록: add_event (1)
+  상담: start_consult → get_consult → save_consult / 텍스트 호출 기록: add_text_call, count_text_calls, text_cost_today
+  악용 감지: add_flag, count_flags (상담 단계라 events 대신 flags 테이블)
+  광고 조언(자유 대화): start_advice → get_advice → save_advice
 
 ponytail: 로컬 SQLite·디스크는 ms 단위라 동기 함수. 이벤트 루프가 막히면 서빙에서 asyncio.to_thread로 감싸기
 """
@@ -85,11 +88,13 @@ def finish_generation(
     background: bytes | None = None,
     text_layout: dict | None = None,
     params: dict | None = None,
+    product: bytes | None = None,
     **result,
 ) -> dict:
     """이미지 저장 + 성공 기록. result: backend(fallback이면 바뀐 값), model, seed, image_ms 등 _RESULT_COLS.
 
     image: 글자를 얹은 최종 이미지. background: 글자 없는 원본 (글자 고치기용). text_layout: {position, font, size_scale}
+    product: keep_product일 때 배경이 투명한 상품 사진 (api_spec_next 4) → product_url
     """
     if bad := set(result) - _RESULT_COLS:
         raise TypeError(f"모르는 열: {bad}")
@@ -97,6 +102,8 @@ def finish_generation(
     params = {**(params or {}), "width": width, "height": height}
     if background is not None:
         params["background_path"] = storage.save(f"{gid}-bg.png", background)
+    if product is not None:
+        params["product_path"] = storage.save(f"{gid}-product.png", product)
     sets = "".join(f", {k}=?" for k in result)
     _run(
         f"""UPDATE generations SET status='success', image_path=?, copy_json=?, params_json=?{sets}
@@ -216,7 +223,11 @@ def family(gid: str, limit: int = 50) -> list[dict] | None:
     return items[:limit]
 
 
-EVENT_TYPES = {"download", "copy_link", "remake", "edit_text", "cutout", "pick_copy"}
+EVENT_TYPES = {
+    "download", "copy_link", "remake", "edit_text", "cutout", "pick_copy",
+    "add_qr", "tip_click", "copy_kit",  # api_spec_consult 5장 + 게시 문구 키트 복사
+    "flag",  # 서버만 남김 (악용 감지). API에서는 받지 않음
+}
 EVENT_DETAIL_MAX_BYTES = 4096
 
 
@@ -258,6 +269,7 @@ def get_generation(gid: str) -> dict | None:
         "status": r["status"],
         "image_url": storage.url(r["image_path"]),
         "background_url": storage.url(params.get("background_path")),
+        "product_url": storage.url(params.get("product_path")),
         "message": copy.get("message", input.get("message")),
         "text_layout": copy.get("text_layout"),
         "source": r["backend"],
@@ -372,3 +384,148 @@ def section_input(pid: str, index: int) -> dict | None:
         "section": json.loads(rows[0]["sections_json"])[index],
         "parent_id": prev["id"] if prev else None,
     }
+
+
+# ---------- 상담 · 텍스트 호출 (api_spec_consult 3·4) ----------
+
+_TODAY = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+9 hours', 'start of day', '-9 hours')"
+
+
+def start_consult(client_id: str, ip: str | None, start: dict, first_message: dict) -> str:
+    """상담 1건 시작. 첫 질문(서버가 한 말)을 messages에 넣어 둠."""
+    cid = "c_" + uuid.uuid4().hex
+    _run(
+        """INSERT INTO consults (id, client_id, ip, start_json, answers_json, messages_json)
+           VALUES (?, ?, ?, ?, '{}', ?)""",
+        (cid, client_id, ip, json.dumps(start, ensure_ascii=False),
+         json.dumps([first_message], ensure_ascii=False)),
+    )
+    return cid
+
+
+def get_consult(cid: str) -> dict | None:
+    rows = _run("SELECT * FROM consults WHERE id=?", (cid,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r["id"],
+        "client_id": r["client_id"],
+        "created_at": r["created_at"],
+        "start": json.loads(r["start_json"]),
+        "answers": json.loads(r["answers_json"]),
+        "messages": json.loads(r["messages_json"]),
+        "brief": json.loads(r["brief_json"]) if r["brief_json"] else None,
+        "turn": r["turn"],
+        "off_topic": r["off_topic"],
+        "edits_left": r["edits_left"],
+        "ended": bool(r["ended"]),
+    }
+
+
+def save_consult(c: dict) -> None:
+    """get_consult로 받은 dict를 고친 뒤 그대로 저장."""
+    _run(
+        """UPDATE consults SET answers_json=?, messages_json=?, brief_json=?,
+           turn=?, off_topic=?, edits_left=?, ended=? WHERE id=?""",
+        (
+            json.dumps(c["answers"], ensure_ascii=False),
+            json.dumps(c["messages"], ensure_ascii=False),
+            json.dumps(c["brief"], ensure_ascii=False) if c["brief"] is not None else None,
+            c["turn"], c["off_topic"], c["edits_left"], int(bool(c["ended"])), c["id"],
+        ),
+    )
+
+
+def add_text_call(
+    kind: str, client_id: str, ip: str | None, *,
+    model: str | None = None, source: str | None = None, cost_usd: float | None = None,
+) -> None:
+    """텍스트 모델 호출 1건 (consult_start · consult_turn · convert). 하루 횟수·금액 계산용."""
+    _run(
+        "INSERT INTO text_calls (kind, client_id, ip, model, source, cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+        (kind, client_id, ip, model, source, cost_usd),
+    )
+
+
+def count_text_calls(kind: str, *, client_id: str | None = None, ip: str | None = None) -> int:
+    """오늘(한국 시간) kind 호출 수. client_id·ip를 주면 그 사람·그 IP만."""
+    sql, args = f"SELECT COUNT(*) FROM text_calls WHERE kind=? AND created_at >= {_TODAY}", [kind]
+    if client_id is not None:
+        sql += " AND client_id=?"
+        args.append(client_id)
+    if ip is not None:
+        sql += " AND ip=?"
+        args.append(ip)
+    return _run(sql, tuple(args))[0][0]
+
+
+def text_cost_today() -> float:
+    """오늘(한국 시간) 텍스트 호출 OpenAI 금액 합(달러)."""
+    return float(_run(f"SELECT SUM(cost_usd) FROM text_calls WHERE created_at >= {_TODAY}")[0][0] or 0)
+
+
+# advice_*: /advice 대화 (consult_id 없이 남김)
+FLAG_REASONS = {"moderation", "off_topic", "advice_moderation", "advice_off_topic"}
+
+
+def add_flag(reason: str, client_id: str, ip: str | None, *, consult_id: str | None = None) -> None:
+    """악용 감지 1건 (원문은 남기지 않음). 모르는 reason이면 ValueError."""
+    if reason not in FLAG_REASONS:
+        raise ValueError(f"모르는 reason: {reason}")
+    _run(
+        "INSERT INTO flags (reason, client_id, ip, consult_id) VALUES (?, ?, ?, ?)",
+        (reason, client_id, ip, consult_id),
+    )
+
+
+def count_flags(*, client_id: str | None = None, ip: str | None = None) -> int:
+    """오늘(한국 시간) 악용 감지 수. client_id·ip를 주면 그 사람·그 IP만."""
+    sql, args = f"SELECT COUNT(*) FROM flags WHERE created_at >= {_TODAY}", []
+    if client_id is not None:
+        sql += " AND client_id=?"
+        args.append(client_id)
+    if ip is not None:
+        sql += " AND ip=?"
+        args.append(ip)
+    return _run(sql, tuple(args))[0][0]
+
+
+# ---------- 광고 조언 자유 대화 (POST /advice) ----------
+
+def start_advice(client_id: str, ip: str | None, consult_id: str | None, advice: dict) -> str:
+    """첫 답이 나온 대화를 저장하고 id("a_…")를 돌려줌. advice: messages, turn, off_topic, ended."""
+    aid = "a_" + uuid.uuid4().hex
+    _run(
+        """INSERT INTO advices (id, client_id, ip, consult_id, messages_json, turn, off_topic, ended)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (aid, client_id, ip, consult_id, json.dumps(advice["messages"], ensure_ascii=False),
+         advice["turn"], advice["off_topic"], int(bool(advice["ended"]))),
+    )
+    return aid
+
+
+def get_advice(aid: str) -> dict | None:
+    rows = _run("SELECT * FROM advices WHERE id=?", (aid,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r["id"],
+        "client_id": r["client_id"],
+        "consult_id": r["consult_id"],
+        "created_at": r["created_at"],
+        "messages": json.loads(r["messages_json"]),
+        "turn": r["turn"],
+        "off_topic": r["off_topic"],
+        "ended": bool(r["ended"]),
+    }
+
+
+def save_advice(a: dict) -> None:
+    """get_advice로 받은 dict를 고친 뒤 그대로 저장."""
+    _run(
+        "UPDATE advices SET messages_json=?, turn=?, off_topic=?, ended=? WHERE id=?",
+        (json.dumps(a["messages"], ensure_ascii=False), a["turn"], a["off_topic"],
+         int(bool(a["ended"])), a["id"]),
+    )

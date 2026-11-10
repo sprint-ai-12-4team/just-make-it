@@ -1,7 +1,9 @@
 "use client";
 
 import { CutoutEditor } from "@/components/CutoutEditor";
+import { CopyKit } from "@/components/CopyKit";
 import { GenProgress } from "@/components/GenProgress";
+import { QrOverlay, QrStamp, type QrPreview } from "@/components/QrStamp";
 import { Shell } from "@/components/Shell";
 import { StickyPreview } from "@/components/StickyPreview";
 import { TextCanvas } from "@/components/TextCanvas";
@@ -10,8 +12,8 @@ import { api, ApiError } from "@/lib/api";
 import { canvasOf, placeOnScene } from "@/lib/cutout";
 import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
-import { drawText, loadCopies, loadFont, POSITION_Y, saveCopies, styleFor, TEXT_STYLES, type TextState } from "@/lib/textStyles";
-import { ADJUSTMENTS, type GenerateInput, type Generation, type Purpose } from "@/lib/types";
+import { drawText, FONTS, joinWords, loadCopies, loadFonts, POSITION_Y, saveCopies, splitWords, styleFor, TEXT_STYLES, type TextState, type WordState } from "@/lib/textStyles";
+import { ADJUSTMENTS, IMAGE_MODELS, type Brief, type GenerateInput, type Generation, type ImageModel, type Purpose } from "@/lib/types";
 import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -46,7 +48,7 @@ async function composeScene(g: Generation) {
   const [scene, product] = await Promise.all([loadImage(g.background_url!), loadImage(g.product_url!)]);
   const bg = placeOnScene(scene, product);
   const text = textOf(g);
-  await loadFont(TEXT_STYLES.find((s) => s.id === text.style) ?? TEXT_STYLES[0]).catch(() => {});
+  await loadFonts(text);
   const out = canvasOf(bg.width, bg.height);
   drawText(out, bg, text);
   return { bg, out, text };
@@ -67,6 +69,7 @@ function ResultPage() {
   const [g, setG] = useState<Generation | null>(null);
   // null이면 서버가 얹은 image_url 그대로. 값이 있으면 background_url 위에 직접 얹는 중
   const [edit, setEdit] = useState<TextState | null>(null);
+  const [word, setWord] = useState<number | null>(null); // 단어별 편집 중 고른 단어
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -80,7 +83,16 @@ function ResultPage() {
   const [familyFromServer, setFamilyFromServer] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
+  const [brief, setBrief] = useState<Brief | null>(null);
+  const [qr, setQr] = useState<QrPreview | null>(null); // 저장 전 그림 위에 얹어 보는 QR
+  const [model, setModel] = useState<ImageModel | null>(null); // 다시 만들 때 그림 품질. null이면 처음 고른 것 (서버가 input에 안 돌려주면 빠르게)
   const composed = useRef(""); // 개발 모드에서 effect가 두 번 돌아도 한 번만 올림
+
+  // 상담에서 왔으면 기획서의 채널·기간을 게시 문구 키트에 씀. 못 불러와도 그대로 동작
+  const consultId = g?.input?.consult_id;
+  useEffect(() => {
+    if (consultId) api.getConsult(consultId).then((c) => setBrief(c.brief), () => {});
+  }, [consultId]);
 
   useEffect(() => {
     setCopies(loadCopies(id));
@@ -158,9 +170,10 @@ function ResultPage() {
   function remake(adjustments: string[]) {
     if (!g?.input) return;
     // 원본 사진은 서버가 parent_id로 다시 씀. 직접 고친 문구를 이어 씀 (g.input.message는 처음 입력값)
-    api.logEvent(g.id, "remake", { adjustments });
+    const image_model = model ?? g.input.image_model ?? IMAGE_MODELS[0].id;
+    api.logEvent(g.id, "remake", { adjustments, image_model });
     const message = edit?.text.trim() || g.message;
-    start({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id });
+    start({ ...g.input, message, style: g.input.style ?? null, adjustments, parent_id: g.id, image_model });
   }
 
   async function copyLink() {
@@ -191,6 +204,25 @@ function ResultPage() {
     }
   }
 
+  /** QR 넣은 그림을 링크에 저장. 서버에 저장 기능이 없으면(404) 내 기기에 저장 */
+  async function saveQr(out: HTMLCanvasElement, host: string) {
+    if (!g) return;
+    const message = edit?.text.trim() || g.message;
+    const background = bgSrc ? await fetch(bgSrc).then((r) => r.blob()) : null;
+    try {
+      setG(await api.saveImage(g.id, await pngOf(out), background, message));
+      setEdit(null);
+      if (bgSrc) URL.revokeObjectURL(bgSrc);
+      setBgSrc("");
+      setUploaded(true);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+      save(out, `광고-QR-${message.slice(0, 10)}.png`, setError);
+      setError("아직 링크에 저장할 수 없어서 QR 넣은 그림을 내 기기에 저장했어요.");
+    }
+    api.logEvent(g.id, "add_qr", { host });
+  }
+
   // 합치기 전 장면(상품 없음)이 잠깐 보이지 않게
   if (g?.status === "success" && g.product_url && !g.edited && !bgSrc && !error) return <Waiting title="상품을 배경에 올리고 있어요" hint="잠깐이면 돼요." />;
   if (busy) return <Waiting title="만들기를 시작했어요" hint="곧 진행 상황을 보여 드려요." />;
@@ -209,7 +241,7 @@ function ResultPage() {
       <div aria-busy className="aspect-square animate-pulse rounded-card bg-mist" />
     );
 
-  if (g.status === "processing") return <GenProgress message={g.message} progress={g.progress} />;
+  if (g.status === "processing") return <GenProgress g={g} />;
   if (g.status === "error")
     return (
       <Notice
@@ -236,6 +268,10 @@ function ResultPage() {
     <div className="flex flex-col gap-8">
       <h1 className="text-h font-bold">다 만들었어요!</h1>
 
+      {/* 넓은 화면: 그림 왼쪽 고정 + 설정 오른쪽. 좁은 화면: 내리면 그림이 서서히 줄어듦 (globals.css .page-wide) */}
+      <div className={`page-wide flex flex-col gap-8 ${cutout ? "" : "lg:grid lg:grid-cols-2 lg:items-start lg:gap-10"}`}>
+      {/* 좁은 화면은 contents: 미리보기의 sticky가 페이지 전체 기준으로 동작하게 */}
+      <div className={`flex flex-col gap-4 max-lg:contents ${cutout ? "" : "lg:sticky lg:top-4"}`}>
       {cutout && g.background_url ? (
         <CutoutEditor
           photoUrl={g.background_url}
@@ -260,12 +296,13 @@ function ResultPage() {
               node: (
                 // w-fit: 가려지는 곳 표시(%)가 그림 크기에 맞게
                 <div className="relative mx-auto w-fit">
-                  {edit && g.background_url ? <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} /> : original.node}
+                  {edit && g.background_url ? <TextCanvas src={bgSrc || g.background_url} state={edit} onChange={setEdit} canvasRef={canvasRef} selected={word} onSelect={setWord} /> : original.node}
                   {/* 화면에만 보이는 표시. canvas 저장에는 안 들어감 */}
                   {showCovered &&
                     covered?.boxes.map((b, i) => (
                       <div key={i} aria-hidden className="pointer-events-none absolute bg-ink/50" style={{ left: `${b.left}%`, top: `${b.top}%`, width: `${b.width}%`, height: `${b.height}%` }} />
                     ))}
+                  {qr && <QrOverlay place={qr} ratio={g.height / g.width} onMove={setQr} />}
                 </div>
               ),
             },
@@ -275,7 +312,7 @@ function ResultPage() {
       )}
 
       {covered && !cutout && (
-        <div className="-mt-4 flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap max-lg:-mt-4 items-center gap-3">
           <button type="button" className="btn-line" aria-pressed={showCovered} onClick={() => setShowCovered(!showCovered)}>
             {showCovered ? <EyeOff aria-hidden className="size-5" /> : <Eye aria-hidden className="size-5" />}
             {showCovered ? "가려지는 곳 숨기기" : "올리면 가려지는 곳 보기"}
@@ -283,6 +320,9 @@ function ResultPage() {
           {showCovered && <p className="hint">{covered.label}</p>}
         </div>
       )}
+      </div>
+
+      <div className="flex min-w-0 flex-col gap-8">
 
       {/* 배경 지우는 중에는 저장·글자 고치기를 숨김: 미리보기가 배경 지우기 화면이라 눌러도 반영이 안 보임 */}
       {!cutout && (
@@ -324,7 +364,15 @@ function ResultPage() {
           {/* 원본이 없는 예전 결과는 직접 고치기 불가 */}
           {g.background_url &&
             (edit ? (
-              <TextEditor state={edit} copies={copies} onChange={setEdit} onReset={() => setEdit(null)} />
+              <TextEditor
+                state={edit}
+                copies={copies}
+                selected={word}
+                onSelect={setWord}
+                onChange={setEdit}
+                onSplit={() => canvasRef.current && (setEdit(splitWords(canvasRef.current.width, canvasRef.current.height, edit)), setWord(null))}
+                onReset={() => (setEdit(null), setWord(null))}
+              />
             ) : (
               <button type="button" className="btn-line" onClick={() => (startEdit(g), api.logEvent(g.id, "edit_text"))}>
                 <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
@@ -346,6 +394,13 @@ function ResultPage() {
         </div>
       )}
 
+      {!cutout && (
+        <>
+          <QrStamp base={() => (edit && canvasRef.current ? Promise.resolve(canvasRef.current) : loadImage(g.image_url))} ratio={g.height / g.width} place={qr} onPlace={setQr} onSave={saveQr} />
+          <CopyKit key={brief ? "brief" : "plain"} gid={g.id} text={edit?.text.trim() || g.message} productName={g.input?.product_name} brief={brief} />
+        </>
+      )}
+
       <section className="card flex flex-col gap-6">
         <h2 className="text-h-sm font-bold">그림이 마음에 안 드세요?</h2>
         <fieldset>
@@ -358,6 +413,22 @@ function ResultPage() {
             ))}
           </div>
         </fieldset>
+        {g.input && (
+          <fieldset>
+            <legend className="label">그림 품질</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {IMAGE_MODELS.map((m) => {
+                const on = (model ?? g.input!.image_model ?? IMAGE_MODELS[0].id) === m.id;
+                return (
+                  <button key={m.id} type="button" aria-pressed={on} onClick={() => setModel(m.id)} className={`rounded-card border-2 p-4 text-left ${on ? "border-ink bg-pollen" : "border-mist bg-white hover:border-charcoal"}`}>
+                    <span className="block font-semibold">{m.title}</span>
+                    <span className="hint">{m.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <button type="button" className="btn-fill" disabled={!picked.length} onClick={() => remake(picked)}>
             고른 대로 다시 만들기
@@ -396,6 +467,8 @@ function ResultPage() {
       <Link href="/" className="btn-line">
         처음부터 새로 만들기
       </Link>
+      </div>
+      </div>
     </div>
   );
 }
@@ -403,48 +476,144 @@ function ResultPage() {
 interface EditorProps {
   state: TextState;
   copies: string[];
+  selected: number | null;
+  onSelect: (i: number | null) => void;
   onChange: (s: TextState) => void;
+  onSplit: () => void;
   onReset: () => void;
 }
 
-/** 문구·스타일·크기. 위치는 미리보기에서 끌어서 (또는 방향키) */
-function TextEditor({ state, copies, onChange, onReset }: EditorProps) {
+/** 스타일(효과)·글꼴·색·크기 고르기. 전체용과 단어용이 같이 씀 */
+function Look({ id, style, font, color, scale, range, onPatch }: {
+  id: string;
+  style: string;
+  font?: string;
+  color?: string;
+  scale: number;
+  range: [number, number];
+  onPatch: (p: { style?: string; font?: string; color?: string; scale?: number }) => void;
+}) {
+  const st = TEXT_STYLES.find((s) => s.id === style) ?? TEXT_STYLES[0];
   return (
-    <section className="card flex flex-col gap-6">
-      <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
-      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
-      <div>
-        <label htmlFor="t" className="label">
-          문구
-        </label>
-        <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
-        <RiskyWords text={state.text} />
-        {copies.length > 0 && (
-          <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
-            {copies.map((c) => (
-              <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>
-                {c}
-              </Chip>
-            ))}
-          </div>
-        )}
-      </div>
+    <>
       <fieldset>
-        <legend className="label">글자 스타일</legend>
+        <legend className="label">글자 스타일 (글꼴·색·테두리·그림자 묶음)</legend>
         <div className="flex flex-wrap gap-2">
           {TEXT_STYLES.map((s) => (
-            <Chip key={s.id} on={state.style === s.id} onClick={() => onChange({ ...state, style: s.id })}>
+            <Chip key={s.id} on={style === s.id} onClick={() => onPatch({ style: s.id, font: undefined, color: undefined })}>
               <span style={{ fontFamily: `"${s.font}"` }}>{s.name}</span>
             </Chip>
           ))}
         </div>
       </fieldset>
+      <fieldset>
+        <legend className="label">글꼴</legend>
+        <div className="flex flex-wrap gap-2">
+          {FONTS.map((f) => (
+            <Chip key={f.id} on={(font ?? st.font) === f.id} onClick={() => onPatch({ font: f.id })}>
+              <span style={{ fontFamily: `"${f.id}"` }}>{f.name}</span>
+            </Chip>
+          ))}
+        </div>
+      </fieldset>
+      <div className="flex flex-wrap items-center gap-3">
+        <label htmlFor={`${id}-color`} className="label mb-0">
+          글자 색
+        </label>
+        <input id={`${id}-color`} type="color" value={color ?? "#ffffff"} onChange={(e) => onPatch({ color: e.target.value })} className="h-11 w-16 cursor-pointer rounded-btn border-2 border-mist" />
+        {color && (
+          <button type="button" className="btn-line min-h-[44px] px-4" onClick={() => onPatch({ color: undefined })}>
+            스타일 색으로
+          </button>
+        )}
+      </div>
       <div>
-        <label htmlFor="size" className="label">
+        <label htmlFor={`${id}-size`} className="label">
           글자 크기
         </label>
-        <input id="size" type="range" min={0.6} max={1.6} step={0.05} value={state.scale} onChange={(e) => onChange({ ...state, scale: Number(e.target.value) })} className="w-full accent-ink" />
+        <input id={`${id}-size`} type="range" min={range[0]} max={range[1]} step={0.05} value={scale} onChange={(e) => onPatch({ scale: Number(e.target.value) })} className="w-full accent-ink" />
       </div>
+    </>
+  );
+}
+
+/** 문구·스타일·글꼴·색·크기. 위치는 미리보기에서 끌어서 (또는 방향키). 단어별로 나누면 단어마다 따로 */
+function TextEditor({ state, copies, selected, onSelect, onChange, onSplit, onReset }: EditorProps) {
+  const words = state.words;
+  const w = words && selected !== null ? words[selected] : null;
+  const setWords = (next: WordState[]) => onChange({ ...state, words: next, text: joinWords(next) });
+  const patchWord = (p: Partial<WordState>) => words && selected !== null && setWords(words.map((x, i) => (i === selected ? { ...x, ...p } : x)));
+  // 전체에 한꺼번에: 단어마다 따로 고친 같은 항목은 지움 (크기는 단어 크기에 곱함)
+  const patchAll = (p: Partial<TextState>) => {
+    const clear = Object.keys(p).filter((k) => k !== "scale");
+    onChange({ ...state, ...p, words: words?.map((x) => ({ ...x, ...Object.fromEntries(clear.map((k) => [k, undefined])) })) });
+  };
+
+  return (
+    <section className="card flex flex-col gap-6">
+      <h2 className="text-h-sm font-bold">글자 직접 고치기</h2>
+      <p className="-mt-4 hint">그림은 그대로 두고 글자만 바꿔요. 위 이미지에서 글자를 끌어서 옮길 수 있어요.</p>
+
+      <div className="grid grid-cols-2 gap-2" role="group" aria-label="고치는 방법">
+        <button type="button" aria-pressed={!words} className={!words ? "btn-fill" : "btn-line"} onClick={() => words && (onChange({ ...state, words: undefined }), onSelect(null))}>
+          문구 전체
+        </button>
+        <button type="button" aria-pressed={!!words} className={words ? "btn-fill" : "btn-line"} onClick={() => !words && onSplit()}>
+          단어별로
+        </button>
+      </div>
+
+      {!words ? (
+        <div>
+          <label htmlFor="t" className="label">
+            문구
+          </label>
+          <textarea id="t" rows={2} className="field" value={state.text} onChange={(e) => onChange({ ...state, text: e.target.value })} />
+          <RiskyWords text={state.text} />
+          {copies.length > 0 && (
+            <div className="mt-3 flex flex-col gap-2" role="group" aria-label="추천받은 문구. 누르면 바로 얹어져요">
+              {copies.map((c) => (
+                <Chip key={c} on={state.text === c} onClick={() => onChange({ ...state, text: c })}>
+                  {c}
+                </Chip>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <p className="hint">고칠 단어를 고르세요. 위 이미지에서 단어를 눌러도 돼요. 빈 곳을 끌면 전체가 같이 움직여요.</p>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="단어 고르기">
+            {words.map((x, i) => (
+              <Chip key={i} on={selected === i} onClick={() => onSelect(selected === i ? null : i)}>
+                {x.text || "(빈 단어)"}
+              </Chip>
+            ))}
+          </div>
+          <RiskyWords text={state.text} />
+        </div>
+      )}
+
+      {w && (
+        <div className="flex flex-col gap-6 rounded-card border-2 border-ink p-5">
+          <h3 className="font-bold">‘{w.text}’만 고치기</h3>
+          <div>
+            <label htmlFor="w-text" className="label">
+              단어
+            </label>
+            <input id="w-text" className="field" value={w.text} onChange={(e) => patchWord({ text: e.target.value })} />
+            <p className="mt-2 hint">지우면 이 단어가 빠져요.</p>
+          </div>
+          <Look id="w" style={w.style ?? state.style} font={w.font ?? state.font} color={w.color ?? state.color} scale={w.scale ?? 1} range={[0.4, 2.5]} onPatch={patchWord} />
+          <button type="button" className="btn-line" onClick={() => patchWord({ style: undefined, font: undefined, color: undefined, scale: undefined })}>
+            <Undo2 aria-hidden className="size-5" /> 이 단어 모양을 전체와 같게
+          </button>
+        </div>
+      )}
+
+      {words && <h3 className="-mb-2 font-bold">전체에 한꺼번에</h3>}
+      <Look id="all" style={state.style} font={state.font} color={state.color} scale={state.scale} range={[0.6, 1.6]} onPatch={patchAll} />
+
       <button type="button" className="btn-line" onClick={onReset}>
         <Undo2 aria-hidden className="size-5" /> 처음 이미지로 돌아가기
       </button>

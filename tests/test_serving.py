@@ -25,6 +25,7 @@ from just_make_it.core.base import (
     TextGenerationError,
     TextResult,
 )
+from just_make_it.serving.assistant import MockTextModels
 from just_make_it.serving.copywriter import CopyInputError, CopyWriter
 from just_make_it.serving.detail_pages import MockDetailWriter
 from just_make_it.serving.generators import (
@@ -174,6 +175,7 @@ def make_client(
     premium=None,
     copywriter=None,
     detail_writer=None,
+    text_models=None,
     **overrides,
 ):
     settings = ServingSettings(
@@ -182,6 +184,8 @@ def make_client(
             "data_dir": tmp_path,
             "generate_wait_seconds": 5.0,
             "load_models_in_background": False,
+            # 웜업은 따로 테스트 (켜 두면 가짜 모델 호출 수가 1 늘어남)
+            "warmup_on_start": False,
             **overrides,
         },
     )
@@ -191,6 +195,7 @@ def make_client(
         generators=(primary, fallback, premium),
         copywriter=copywriter or FakeCopyWriter(),
         detail_writer=detail_writer or MockDetailWriter(),
+        text_models=text_models or MockTextModels(),
     )
     return TestClient(app)
 

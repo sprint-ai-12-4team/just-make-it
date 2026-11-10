@@ -96,3 +96,47 @@ def build_image_prompt(
         "Photorealistic, high quality.",
     ]
     return " ".join(parts)
+
+
+def build_scene_prompt(scene, purpose=DEFAULT_PURPOSE, style=None, adjustments=None):
+    """상품 없는 장면 프롬프트 (keep_product, api_spec_next 4장).
+
+    상품은 사용자 사진을 그대로 프론트가 가운데 아래(가로 60%, 세로 55%)에 놓으므로,
+    그 자리를 비우고 상품 이름·생김새는 넣지 않습니다 (넣으면 모델이 상품을 그림).
+    문구는 위쪽에 얹으므로 위쪽도 조용하게 둡니다.
+
+    Args:
+        scene: 장면 영어 묘사 (copywriter.describe_for_image 결과)
+        purpose: 광고 목적
+        style: 분위기 칩 값
+        adjustments: 조금 수정하기 칩 목록
+
+    Returns:
+        str: 이미지 프롬프트
+    """
+    framing = FRAMING.get(purpose, FRAMING[DEFAULT_PURPOSE]).replace(
+        "the product centered on a clean simple background", "clean simple background"
+    )
+    parts = [
+        "A professional commercial product photography backdrop with no product in it.",
+        f"Setting: {scene.rstrip('.')}.",
+        f"{framing[0].upper() + framing[1:]}, eye-level camera.",
+        (
+            "The lower center of the frame (about 60 percent of the width and 55 percent of the height) "
+            "is an empty, flat, uncluttered surface such as a table top or pedestal, "
+            "with nothing standing on it, ready for a product to be placed later."
+        ),
+        "Props and decorations only at the far edges and in the soft background.",
+    ]
+    if style in STYLE_PRESETS:
+        parts.append(f"Mood: {STYLE_PRESETS[style]}.")
+    for adjustment in adjustments or []:
+        if adjustment in IMAGE_ADJUSTMENTS:
+            parts.append(IMAGE_ADJUSTMENTS[adjustment])
+    parts += [
+        "Keep the upper third of the frame as calm, softly blurred background with no objects in it.",
+        "No people, no hands.",
+        "No text, no letters, no words, no numbers, no signage, no labels, no logos, no watermark.",
+        "Photorealistic, high quality.",
+    ]
+    return " ".join(parts)

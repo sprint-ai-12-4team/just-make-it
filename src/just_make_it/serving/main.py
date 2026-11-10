@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .assistant import AssistantService, CoreTextModels, MockTextModels, TextModels
 from .copywriter import CopyWriter, CoreCopyWriter, MockCopyWriter
 from .detail_pages import (
     CoreDetailWriter,
@@ -37,6 +38,7 @@ def create_app(
     generators: Generators | None = None,
     copywriter: CopyWriter | None = None,
     detail_writer: DetailWriter | None = None,
+    text_models: TextModels | None = None,
 ) -> FastAPI:
     """앱을 만든다. 테스트에서는 설정·생성기·문구 생성기를 갈아 끼울 수 있다."""
     settings = settings or get_serving_settings()
@@ -53,10 +55,17 @@ def create_app(
             else CoreDetailWriter()
         )
 
+    if text_models is None:
+        text_models = (
+            MockTextModels() if settings.image_backend == "mock" else CoreTextModels()
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         manager = QueueManager(settings, primary, fallback, premium, records)
         app.state.manager = manager
+        # AI 상담·문구 변환 (텍스트 호출, GPU 대기열 밖)
+        app.state.assistant = AssistantService(settings, manager, records, text_models)
         detail_pages = DetailPageService(settings, manager, detail_writer, records)
         app.state.detail_pages = detail_pages
         await manager.start()
