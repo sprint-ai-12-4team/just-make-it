@@ -105,7 +105,7 @@ def fakes(monkeypatch):
     gemma = FakeText("gemma4:12b-it-qat")
     luna = FakeText("gpt-5.6-luna", cost=0.0004)
     klein = FakeImage("FLUX.2 [klein] 4B")
-    flare = FakeImage("gpt-image-2.5-flare", cost=0.0136)
+    flare = FakeImage("gpt-image-2.6-flare", cost=0.0136)
     monkeypatch.setattr(ai_models, "get_gemma", lambda: gemma)
     monkeypatch.setattr(ai_models, "get_luna", lambda: luna)
     monkeypatch.setattr(ai_models, "get_klein", lambda: klein)
@@ -339,7 +339,7 @@ def test_wrong_output_raises(fakes):
 def test_fallback_when_klein_fails(fakes):
     fakes["klein"].fail = True
     result = generate_ad_image("동네빵집 버터롤", "신메뉴 출시")
-    assert result.image_model == "gpt-image-2.5-flare"
+    assert result.image_model == "gpt-image-2.6-flare"
     assert "klein 실패" in result.image_fallback_reason
     assert result.cost_usd > 0
 
@@ -354,7 +354,7 @@ def test_no_fallback_raises(fakes, monkeypatch):
 
 def test_unknown_item_without_reference_goes_to_flare(fakes):
     result = generate_ad_image("소금빵", "신메뉴 출시", style="따뜻한")
-    assert result.image_model == "gpt-image-2.5-flare"
+    assert result.image_model == "gpt-image-2.6-flare"
     assert result.product_source == "품목 사전"
     assert fakes["klein"].calls == []
 
@@ -474,12 +474,12 @@ def test_report_counts_models_and_cost():
         {
             **base,
             "case_id": "C02",
-            "model": "gpt-image-2.5-flare",
+            "model": "gpt-image-2.6-flare",
             "cost_usd": "0.0142",
         },
     ]
     report = build_report({"run1": rows})
-    assert "FLUX.2 [klein] 4B 1, gpt-image-2.5-flare 1" in report
+    assert "FLUX.2 [klein] 4B 1, gpt-image-2.6-flare 1" in report
     assert "0.0142" in report
 
 
@@ -500,7 +500,7 @@ def test_detailed_and_natural_use_api_models(fakes):
         image_quality="detailed",
         text_quality="natural",
     )
-    assert result.image_model == "gpt-image-2.5-flare"
+    assert result.image_model == "gpt-image-2.6-flare"
     assert result.text_model == "gpt-5.6-luna"
     assert result.image_fallback_reason == ""
     assert result.text_fallback_reason == ""
