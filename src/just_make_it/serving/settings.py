@@ -29,6 +29,9 @@ class ServingSettings(BaseSettings):
     generate_text_quality: Literal["basic", "natural"] = "basic"
     # 서버 시작 시 모델(klein)을 뒤에서 불러온다. 다 불러오기 전 요청은 Fallback으로 처리
     load_models_in_background: bool = True
+    # 모델을 불러온 뒤 core 웜업(pipeline.warmup)을 한 번 부른다 (배포 직후 첫 사용자가 오래 기다리지 않게).
+    # 웜업 중 들어온 요청은 잠깐 기다렸다가 로컬로 처리됨 (OpenAI로 넘기지 않음). core에 함수가 없으면 건너뜀
+    warmup_on_start: bool = True
     mock_delay_seconds: float = 2.0
 
     # ----- 기본 생성기 대기열 -----

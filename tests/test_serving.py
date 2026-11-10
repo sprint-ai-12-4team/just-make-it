@@ -184,6 +184,8 @@ def make_client(
             "data_dir": tmp_path,
             "generate_wait_seconds": 5.0,
             "load_models_in_background": False,
+            # 웜업은 따로 테스트 (켜 두면 가짜 모델 호출 수가 1 늘어남)
+            "warmup_on_start": False,
             **overrides,
         },
     )

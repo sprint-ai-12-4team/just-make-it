@@ -34,6 +34,10 @@ class ImageGenerator(ABC):
     def load(self) -> None:  # noqa: B027 - 선택 구현 훅
         """무거운 준비 작업. 서버 시작 시 한 번 호출된다 (기본은 할 일 없음)."""
 
+    def warmup(self) -> float | None:
+        """load 다음에 한 번 실제로 돌려 첫 생성 비용을 미리 치른다. 걸린 초, 할 일 없으면 None."""
+        return None
+
     @property
     def is_ready(self) -> bool:
         return True

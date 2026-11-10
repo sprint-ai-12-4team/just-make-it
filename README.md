@@ -11,10 +11,10 @@
 
 ```mermaid
 flowchart LR
-    U[사용자<br/>Next.js · Vercel] --> A[FastAPI<br/>GCP L4 VM]
+    U["사용자\nNext.js · Vercel"] --> A["FastAPI\nGCP L4 VM"]
     A --> Q{GPU 대기열}
-    Q -->|여유 있음| L[로컬 모델<br/>FLUX.2 klein-4B · Gemma 4]
-    Q -->|가득 참 · 더 정교하게| O[OpenAI<br/>Image 2.5 · GPT-5.6]
+    Q -->|"여유 있음"| L["로컬 모델\nFLUX.2 klein-4B · Gemma 4"]
+    Q -->|"가득 참 · 더 정교하게"| O["OpenAI\nImage 2.5 · GPT-5.6"]
     L --> S[(SQLite + 디스크)]
     O --> S
 ```
@@ -80,12 +80,6 @@ flowchart LR
 프로젝트 기간에만 일시적으로 운영되는 페이지입니다. 아래 링크를 따라가세요.
 
 [🍩 JUST-MAKE-IT Web UI](https://just-make-it-ten.vercel.app)
-
----
-
-## 보고서 PDF
-
-Codeit LMS에 별도 파일로 제출합니다.
 
 ---
 

@@ -213,6 +213,8 @@ async def health(request: Request) -> HealthResponse:
         fallback_model=manager.fallback.name if manager.fallback else None,
         premium_model=manager.premium.name if manager.premium else None,
         models_loading=manager.models_loading,
+        warmup=manager.warmup_state,
+        warmup_seconds=manager.warmup_seconds,
         queue_length=manager.queue_length,
         running=manager.running_count,
         estimated_wait_seconds=round(manager.estimated_wait_for_new_job(), 1),
@@ -357,6 +359,7 @@ async def _submit_generation(request: Request, x_client_id: str | None):
         consult_id=payload.consult_id,
         keep_product=payload.keep_product,
         reference_source=source,
+        image_model=payload.image_model,
         text_quality=manager.text_quality(
             TEXT_QUALITY[payload.text_model]
             if payload.text_model

@@ -253,6 +253,7 @@ class DetailPageService:
             ],
             reference_image=reference,
             text_quality=page.text_quality,
+            image_model=page.image_model,
             # 상세페이지 칸 문구는 아직 프론트 canvas가 얹는다 (api_spec 5장)
             output="image",
         )

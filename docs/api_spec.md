@@ -50,8 +50,12 @@
 ### `GET /health`
 
 ```json
-200 {"status": "ok"}
+200 {"status": "ok", "primary_ready": true, "models_loading": false, "warmup": "done", "warmup_seconds": 12.3, "...": "…"}
 ```
+
+- `warmup` (11-09): 서버를 켤 때 klein을 불러온 뒤 core 웜업 함수(`pipeline.warmup()`, 모델 쪽 담당)를 한 번 불러 첫 생성 비용을 미리 치름. `off`(설정으로 끔) · `pending` · `running` · `done` · `skipped`(mock, core가 건너뛰거나 실패를 기록하고 넘어감 — `KLEIN_UNLOAD_AFTER_USE`·GPU 없음 등) · `failed`(서버는 그대로, 첫 요청만 느림). `warmup_seconds`는 core가 잰 시간
+- 웜업 중 들어온 요청은 잠깐 기다렸다가 로컬로 처리 (OpenAI로 넘기지 않음)
+- `WARMUP_ON_START=false`로 끔
 
 ### `POST /copies` — 홍보 문구 추천
 
