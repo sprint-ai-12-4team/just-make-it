@@ -18,7 +18,7 @@ MODERATION_MODEL = "omni-moderation-latest"
 KLEIN_MODEL = "black-forest-labs/FLUX.2-klein-4B"
 KLEIN_FP8_REPO = "black-forest-labs/FLUX.2-klein-4b-fp8"
 KLEIN_FP8_FILE = "flux-2-klein-4b-fp8.safetensors"
-FLARE_MODEL = "gpt-image-2.5-flare"
+FLARE_MODEL = "gpt-image-2.6-flare"
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 

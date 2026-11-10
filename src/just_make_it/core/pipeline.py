@@ -1,7 +1,7 @@
 """광고 이미지 생성 파이프라인 V1.
 
 사용자가 고르는 품질에 따라 모델이 정해집니다.
-- 그림 fast (빠르게): FLUX.2 [klein] 4B / detailed (더 정교하게): gpt-image-2.5-flare
+- 그림 fast (빠르게): FLUX.2 [klein] 4B / detailed (더 정교하게): gpt-image-2.6-flare
 - 문구 basic (기본): Gemma 4 12B / natural (더 자연스럽게): gpt-5.6-luna
 VM의 로컬 모델(klein, Gemma)이 실패하면 API 모델(flare, luna)로 폴백합니다.
 

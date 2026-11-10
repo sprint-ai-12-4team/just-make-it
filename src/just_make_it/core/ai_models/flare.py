@@ -1,4 +1,4 @@
-"""API 이미지 모델: OpenAI gpt-image-2.5-flare.
+"""API 이미지 모델: OpenAI gpt-image-2.6-flare.
 
 그림 품질에서 더 정교하게를 골랐을 때 쓰고, klein이 실패하거나 klein이 모르는 품목일 때 폴백으로도 씁니다.
 """
@@ -14,7 +14,7 @@ from just_make_it.core.base import ImageGenerationError, ImageResult
 
 
 class FlareImageModel:
-    """OpenAI gpt-image-2.5-flare."""
+    """OpenAI gpt-image-2.6-flare."""
 
     def __init__(self, model=config.FLARE_MODEL, quality=config.OPENAI_IMAGE_QUALITY):
         """
