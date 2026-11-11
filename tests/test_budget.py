@@ -15,7 +15,7 @@ from test_serving import (  # noqa: F401 (isolate_env는 fixture)
 from just_make_it import config
 from just_make_it.serving.generators import MockGenerator
 
-DETAILED = {**BASE_BODY, "image_model": "openai-image-2.5-flare"}
+DETAILED = {**BASE_BODY, "image_model": "openai-image-2.6-flare"}
 
 
 class CostlyMock(MockGenerator):

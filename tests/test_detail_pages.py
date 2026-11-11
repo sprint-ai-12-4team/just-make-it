@@ -267,7 +267,7 @@ def test_detailed_image_model_uses_premium_for_sections(tmp_path):
     with make_client(tmp_path, premium=premium) as client:
         pid = client.post(
             "/detail-pages",
-            json={**DETAIL_BODY, "image_model": "openai-image-2.5-flare"},
+            json={**DETAIL_BODY, "image_model": "openai-image-2.6-flare"},
         ).json()["id"]
         wait_done(client, pid)
     assert {r["route"] for r in section_rows(tmp_path)} == {"premium"}

@@ -95,7 +95,7 @@
 | `adjustments` | string[] | | `[]` | "조금 수정하기" 칩 값 |
 | `parent_id` | string | | `null` | 다시 만들기·수정할 때 원본 결과의 `id` |
 | `consult_id` | string | | `null` | AI 상담에서 넘어왔으면 그 상담 `id` (결과 `input`에 남음, 비교용) |
-| `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
+| `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.6-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록). 예전 값 `openai-image-2.5-flare`도 받아서 2.6으로 저장 (11-11, core flare 2.6) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
 | `reference_source` | string | | `null` | 참고 사진 출처: `upload` 직접 올림 · `stock` Pixabay에서 고름 · `null` 사진 없음 ([아래](#reference_source--참고-사진-출처)) |
 | `keep_product` | bool | | `false` | 상품 사진 그대로, 배경 장면만 AI ([아래](#keep_product--내-상품-사진-그대로-배경만-ai로-s1)). `true`면 배경을 지운 `reference_image` 필수 |
@@ -698,7 +698,7 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 ### 닫힘 (요약)
 
 - 저장소: VM 로컬 디스크 (SQLite + `$DATA_DIR/images`, 만료 없음). 상세페이지는 `detail_pages` + `generations` 행 (`docs/schema.sql`)
-- 모델 선택: `image_model`·`text_model` 고정 목록, `GET /models`는 상주 모델이 바뀔 때. OpenAI 강제는 `image_model: openai-image-2.5-flare`로 대신함
+- 모델 선택: `image_model`·`text_model` 고정 목록, `GET /models`는 상주 모델이 바뀔 때. OpenAI 강제는 `image_model: openai-image-2.6-flare`로 대신함
 - 글자: 서버가 얹고, 자유 위치·단어별 편집은 프론트 canvas → `/image` 저장 (11-04). `text_layout`에 `x`·`y` 없음
 - 다시 만들기 사진: 서버가 `parent_id`의 참고 사진 재사용
 - 사용 기록·고친 그림 저장·같은 원본 목록·`keep_product`·비동기 생성: 서빙·프론트 모두 반영 (10-28 ~ 11-04)

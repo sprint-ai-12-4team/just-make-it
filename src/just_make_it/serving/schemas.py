@@ -15,7 +15,10 @@ Source = Literal["local", "openai", "mock"]
 # 서버가 고른 경로: primary(기본), fallback(대기·장애 우회), premium(유저 선택). 통계용
 Route = Literal["primary", "fallback", "premium"]
 # 프론트가 고르는 모델 (api_spec 1·3장). 화면에는 "빠르게 / 더 정교하게"로만 보인다
-ImageModel = Literal["flux2-klein-4b", "openai-image-2.5-flare"]
+# 11-11: core flare가 gpt-image-2.6-flare로 바뀌어 2.6으로. 예전 값(2.5)은 받아서 2.6으로 바꿈
+FLARE_IMAGE_MODEL = "openai-image-2.6-flare"
+LEGACY_IMAGE_MODELS = {"openai-image-2.5-flare": FLARE_IMAGE_MODEL}
+ImageModel = Literal["flux2-klein-4b", "openai-image-2.6-flare"]
 TextModel = Literal["gemma-4-12b-it", "openai-gpt-5.6-luna"]
 # 참고 사진 출처: upload 직접 올림 · stock 프론트가 보여 준 Pixabay 후보에서 고름 (정량평가용)
 ReferenceSource = Literal["upload", "stock"]
@@ -26,7 +29,9 @@ SIZE_SCALE_MIN, SIZE_SCALE_MAX = 0.6, 1.6
 # 프론트 모델 이름 → core 파이프라인 V1의 품질 값
 IMAGE_QUALITY: dict[str, str] = {
     "flux2-klein-4b": "fast",
-    "openai-image-2.5-flare": "detailed",
+    FLARE_IMAGE_MODEL: "detailed",
+    # 예전 값: DB에 남은 상세페이지(섹션 다시 만들기)가 이 이름으로 품질을 찾음
+    **{old: "detailed" for old in LEGACY_IMAGE_MODELS},
 }
 TEXT_QUALITY: dict[str, str] = {
     "gemma-4-12b-it": "basic",
@@ -39,6 +44,11 @@ def _strip_text(value: object) -> object:
     if isinstance(value, str):
         return value.strip() or None
     return value
+
+
+def _image_model(value: object) -> object:
+    # 예전 이름(openai-image-2.5-flare)은 지금 이름으로 (프론트가 바뀌기 전 요청·예전 결과)
+    return LEGACY_IMAGE_MODELS.get(value, value) if isinstance(value, str) else value
 
 
 def _clean_list(value: object) -> object:
@@ -65,6 +75,7 @@ class GenerateRequest(BaseModel):
     parent_id: str | None = Field(default=None, max_length=64)
     # 그림 품질. klein = 빠르게(로컬, 기본), flare = 더 정교하게(OpenAI)
     image_model: ImageModel = "flux2-klein-4b"
+    _image_model = field_validator("image_model", mode="before")(_image_model)
     # 영어 묘사·"텍스트 짧게"에 쓸 문구 모델. 비우면 서버 설정(GENERATE_TEXT_QUALITY)
     text_model: TextModel | None = None
     # AI 상담에서 넘어왔으면 그 상담 id (상담한 경우 vs 안 한 경우 비교용, 결과 input에 남음)
@@ -148,6 +159,7 @@ class GenerationInput(BaseModel):
     # 사용자가 고른 이미지 품질 (결과 화면 "다시 만들기"의 기본값). 예전 결과는 None.
     # 실제로 쓴 모델은 응답의 source (빠르게를 골라도 대기가 길면 OpenAI로 갈 수 있음)
     image_model: ImageModel | None = None
+    _image_model = field_validator("image_model", mode="before")(_image_model)
     # AI로 꾸미기 결과면 True (parent_id의 글자를 flare가 다시 그림. 글자는 그림에 박힘)
     restyle: bool = False
 
@@ -300,6 +312,7 @@ class DetailPageRequest(BaseModel):
     style: str | None = None
     # 섹션 이미지 품질. 섹션 다시 만들기도 이 값을 그대로 쓴다
     image_model: ImageModel = "flux2-klein-4b"
+    _image_model = field_validator("image_model", mode="before")(_image_model)
     # 섹션 문구 품질. 비우면 서버 설정(GENERATE_TEXT_QUALITY)
     text_model: TextModel | None = None
 

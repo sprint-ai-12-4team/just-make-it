@@ -288,7 +288,7 @@ async def generate(
     - 서버가 문구를 얹은 최종 이미지(`image_url`)와 글자 없는 원본(`background_url`),
       얹은 위치·글꼴·크기(`text_layout`)를 함께 준다. 글자만 고칠 때는 `POST /generations/{id}/text`
     - `image_model`: `flux2-klein-4b`(빠르게, 로컬 GPU 대기열) /
-      `openai-image-2.5-flare`(더 정교하게, OpenAI로 바로)
+      `openai-image-2.6-flare`(더 정교하게, OpenAI로 바로. 예전 값 `openai-image-2.5-flare`도 받음)
     - 로컬이 밀리거나 실패하면 서버가 OpenAI로 넘긴다 (`source`로 기록)
     - `parent_id`만 보내고 사진을 안 보내면 원본 결과의 참고 사진을 다시 쓴다
     - `keep_product`: 상품 사진(배경을 지운 PNG·WEBP) 그대로, 서버는 상품 없는 장면만 그린다.

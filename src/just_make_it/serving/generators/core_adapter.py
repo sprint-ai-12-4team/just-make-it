@@ -23,7 +23,7 @@ from .base import GeneratorError, ImageGenerator
 logger = logging.getLogger(__name__)
 
 # 품질 값 → 프론트 모델 이름 (DB·로그·/health에 남는 이름)
-MODEL_NAMES = {"fast": "flux2-klein-4b", "detailed": "openai-image-2.5-flare"}
+MODEL_NAMES = {"fast": "flux2-klein-4b", "detailed": "openai-image-2.6-flare"}
 
 
 def _source_of(model: str) -> Source:
