@@ -14,7 +14,7 @@ import { loadImage, save } from "@/lib/draw";
 import { remember } from "@/lib/family";
 import { drawText, FONTS, joinWords, loadCopies, loadFonts, POSITION_Y, saveCopies, splitWords, styleFor, TEXT_STYLES, type TextState, type WordState } from "@/lib/textStyles";
 import { ADJUSTMENTS, IMAGE_MODELS, type Brief, type GenerateInput, type Generation, type ImageModel, type Purpose } from "@/lib/types";
-import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Undo2 } from "lucide-react";
+import { Check, CloudUpload, Download, Eye, EyeOff, History, Link2, Loader2, Pencil, RefreshCw, Scissors, Sparkles, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -159,6 +159,21 @@ function ResultPage() {
     setError("");
     try {
       const next = await api.startGeneration(input);
+      saveCopies(next, copies);
+      router.push(`/result/${next}`);
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  /** AI로 꾸미기: 서버에 저장된 지금 문구·위치로 글자만 다시 그린 새 결과 → 새 결과 화면에서 진행 상황 */
+  async function restyle() {
+    if (!g) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await api.restyle(g.id);
       saveCopies(next, copies);
       router.push(`/result/${next}`);
     } catch (e) {
@@ -374,10 +389,23 @@ function ResultPage() {
                 onReset={() => (setEdit(null), setWord(null))}
               />
             ) : (
-              <button type="button" className="btn-line" onClick={() => (startEdit(g), api.logEvent(g.id, "edit_text"))}>
-                <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
-              </button>
+              <div className="flex flex-col gap-2">
+                <button type="button" className="btn-line" onClick={() => (startEdit(g), api.logEvent(g.id, "edit_text"))}>
+                  <Pencil aria-hidden className="size-5" /> 글자 직접 고치기
+                </button>
+                {g.input?.restyle && <p className="hint">글자를 고치면 AI로 꾸민 글자가 기본 글자로 돌아가요.</p>}
+              </div>
             ))}
+
+          {/* 서버에 저장된 글자 기준이라 고치는 중·배경 지운 그림(저장 전)에는 숨김 */}
+          {g.background_url && g.text_layout && !edit && !bgSrc && (
+            <div className="flex flex-col gap-2">
+              <button type="button" className="btn-line" onClick={restyle}>
+                <Sparkles aria-hidden className="size-5" /> {g.input?.restyle ? "AI로 한 번 더 꾸미기" : "AI로 글자 꾸미기"}
+              </button>
+              <p className="hint">그림은 그대로 두고, 글자만 그림에 어울리는 모양으로 다시 그려요. 30초쯤 걸리고 지금 그림은 그대로 남아요.</p>
+            </div>
+          )}
         </>
       )}
 

@@ -2,7 +2,7 @@
 
 export type Purpose = "instagram" | "commerce" | "youtube" | "kakao" | "free";
 export type Status = "processing" | "success" | "error";
-export type ImageModel = "flux2-klein-4b" | "openai-image-2.5-flare";
+export type ImageModel = "flux2-klein-4b" | "openai-image-2.6-flare";
 export type TextModel = "gemma-4-12b-it" | "openai-gpt-5.6-luna";
 
 export interface GenerateInput {
@@ -43,7 +43,7 @@ export interface Generation {
   edited?: boolean;
   progress?: GenProgress | null; // status가 processing일 때 (api_spec V3)
   product_url?: string | null; // keep_product일 때 배경이 투명한 상품. 프론트가 장면 위에 합침 // 브라우저에서 고친 그림을 서버에 저장했으면 true
-  input?: Omit<GenerateInput, "parent_id">;
+  input?: Omit<GenerateInput, "parent_id"> & { restyle?: boolean }; // restyle: AI로 꾸미기 결과 (글자가 그림에 박힘)
 }
 
 /** 비동기 생성 진행 상황 (GET /generations/{id}) */
@@ -194,7 +194,7 @@ export const SIZES: Record<Purpose, [number, number]> = {
 // ponytail: 고정 목록. 서버에 GET /models가 생기면 거기서 받아오기 (api_spec 6장)
 export const IMAGE_MODELS: { id: ImageModel; title: string; desc: string }[] = [
   { id: "flux2-klein-4b", title: "빠르게", desc: "기본 · 몇 초면 완성" },
-  { id: "openai-image-2.5-flare", title: "더 정교하게", desc: "조금 더 걸려요" },
+  { id: "openai-image-2.6-flare", title: "더 정교하게", desc: "조금 더 걸려요" },
 ];
 export const TEXT_MODELS: { id: TextModel; title: string; desc: string }[] = [
   { id: "gemma-4-12b-it", title: "기본", desc: "빠른 문구 추천" },

@@ -134,6 +134,14 @@ export const mock = {
     save(`mock_ready_${g.id}`, Date.now() + 6000);
     return g.id;
   },
+  /** 서버 mock과 같음: 꾸미기 전 그림 그대로, 새 결과로 */
+  async restyle(id: string) {
+    const g = await mock.getGeneration(id);
+    const next = { ...g, id: crypto.randomUUID(), parent_id: id, source: "mock", input: g.input && { ...g.input, restyle: true }, created_at: new Date().toISOString() };
+    save(`mock_g_${next.id}`, next);
+    save(`mock_ready_${next.id}`, Date.now() + 6000);
+    return next.id;
+  },
   async getGeneration(id: string): Promise<Generation> {
     const g = load<Generation>(`mock_g_${id}`);
     if (!g) throw Object.assign(new Error("결과를 찾을 수 없어요."), { status: 404 });
