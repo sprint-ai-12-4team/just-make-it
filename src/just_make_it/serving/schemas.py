@@ -148,6 +148,8 @@ class GenerationInput(BaseModel):
     # 사용자가 고른 이미지 품질 (결과 화면 "다시 만들기"의 기본값). 예전 결과는 None.
     # 실제로 쓴 모델은 응답의 source (빠르게를 골라도 대기가 길면 OpenAI로 갈 수 있음)
     image_model: ImageModel | None = None
+    # AI로 꾸미기 결과면 True (parent_id의 글자를 flare가 다시 그림. 글자는 그림에 박힘)
+    restyle: bool = False
 
 
 class GenerationProgress(BaseModel):
@@ -384,6 +386,16 @@ class HealthResponse(BaseModel):
 
 
 @dataclass
+class RestyleInput:
+    """AI로 꾸미기 작업 입력 (POST /generations/{id}/restyle). 원본 결과에서 가져온다."""
+
+    # 원본의 글자 없는 그림 (꾸민 결과의 background로도 남겨 글자 고치기로 되돌릴 수 있게)
+    background: bytes
+    # 원본의 text_layout {position, font, size_scale}. 위치·크기만 꾸미기에 쓴다
+    text_layout: dict
+
+
+@dataclass
 class GenerationSpec:
     """생성기에 넘기는 작업 명세 (core.generate_ad_image 인자와 같다)."""
 
@@ -408,6 +420,8 @@ class GenerationSpec:
     # core 받는 형태. combined = 서버가 글자를 얹음 (단일 이미지),
     # image = 글자 없는 이미지만 (상세페이지 칸. 아직 프론트가 얹음)
     output: Literal["combined", "image"] = "combined"
+    # AI로 꾸미기 작업이면 원본 정보. 생성기는 새로 그리지 않고 core.restyle_text를 부른다
+    restyle: RestyleInput | None = None
 
 
 @dataclass

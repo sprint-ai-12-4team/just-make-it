@@ -28,6 +28,7 @@ from .detail_pages import (
 from .generators import GeneratorError
 from .queue_manager import (
     ERROR_GENERIC,
+    ApiUnavailableError,
     DailyLimitError,
     QueueFullError,
     QueueManager,
@@ -62,6 +63,7 @@ from .schemas import (
     HealthResponse,
     JobState,
     Purpose,
+    RestyleInput,
     SectionRegenerateRequest,
     SectionRegenerateStarted,
     StatsResponse,
@@ -90,6 +92,11 @@ MSG_EDIT_SIZE = "그림 크기가 원래 결과({width}×{height})와 달라요.
 MSG_EDIT_FORMAT = "고친 그림은 PNG 파일만 저장할 수 있어요."
 MSG_TEXT_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 고쳐 주세요."
 MSG_TEXT_NO_BACKGROUND = "이 결과는 글자를 고칠 수 없어요. 다시 만들어 주세요."
+MSG_RESTYLE_NOT_READY = "아직 만들고 있는 결과예요. 다 만든 뒤에 꾸며 주세요."
+MSG_RESTYLE_NO_BACKGROUND = "이 결과는 AI로 꾸밀 수 없어요. 다시 만들어 주세요."
+MSG_RESTYLE_UNAVAILABLE = (
+    "지금은 AI로 꾸미기를 쓸 수 없어요. 잠시 후 다시 시도해 주세요."
+)
 MSG_SECTION_NO_TEXT = "문구를 만들지 못한 상세페이지예요. 처음부터 다시 만들어 주세요."
 MSG_EVENT_BAD = "기록할 수 없는 요청이에요."
 MSG_KEEP_PRODUCT_PHOTO = "상품 그대로 쓰려면 배경을 지운 상품 사진을 올려 주세요."
@@ -680,6 +687,74 @@ async def edit_text(request: Request, generation_id: str) -> GenerationResponse:
         records.update_text, generation_id, image, message=message, text_layout=actual
     )
     return GenerationResponse.model_validate(updated)
+
+
+@router.post(
+    "/generations/{generation_id}/restyle",
+    status_code=202,
+    response_model=GenerationStarted,
+    responses={
+        404: {"description": "없는 결과 id"},
+        409: {
+            "description": "아직 processing·error인 결과, 또는 글자 없는 원본이 없는 결과"
+            " (예전 결과·상세페이지 칸)"
+        },
+        429: {"description": "하루 생성 한도 또는 OpenAI 하루 한도 초과"},
+        503: {"description": "OpenAI를 쓸 수 없음 (하루 금액 상한 초과 등)"},
+    },
+)
+async def restyle(
+    request: Request,
+    generation_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> GenerationStarted:
+    """AI로 꾸미기: 만든 결과의 글자를 OpenAI(flare)가 장면에 맞게 다시 그린다. **비동기 (202)**.
+
+    - 본문 없음. 원본 결과의 지금 문구·위치·크기를 그대로 쓴다 (글자 고치기를 했으면 고친 값)
+    - **새 결과**로 남는다 (`parent_id` = 원본, `input.restyle` = true). 원본은 그대로라 되돌릴 수 있음
+    - 결과는 `GET /generations/{id}`로 조회 (`POST /generations`와 같은 폴링). 보통 20~40초
+    - 꾸민 글자는 그림에 박혀서 옮길 수 없다. 꾸민 결과에서 글자 고치기를 하면 기본 글자(PIL)로 돌아감
+    - OpenAI만 쓰므로 로컬 대기열을 거치지 않고, 하루 생성 한도·OpenAI 한도·금액 상한에 같이 센다
+    """
+    records = _records(request)
+    record = await asyncio.to_thread(records.get, generation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=MSG_NOT_FOUND)
+    if record["status"] != "success":
+        raise HTTPException(status_code=409, detail=MSG_RESTYLE_NOT_READY)
+    background = await asyncio.to_thread(records.background, generation_id)
+    if background is None or not record.get("text_layout"):
+        raise HTTPException(status_code=409, detail=MSG_RESTYLE_NO_BACKGROUND)
+
+    given = record["input"]
+    spec = GenerationSpec(
+        product_name=given["product_name"],
+        message=record["message"],
+        purpose=given.get("purpose", "free"),
+        style=given.get("style"),
+        consult_id=given.get("consult_id"),
+        keep_product=bool(given.get("keep_product")),
+        reference_source=given.get("reference_source"),
+        image_model=given.get("image_model"),
+        restyle=RestyleInput(background=background, text_layout=record["text_layout"]),
+    )
+    manager = _manager(request)
+    try:
+        job = await manager.submit_restyle(
+            spec, client_id=_client_id(x_client_id), parent_id=generation_id
+        )
+    except ApiUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=MSG_RESTYLE_UNAVAILABLE) from exc
+    except DailyLimitError as exc:
+        raise HTTPException(status_code=429, detail=MSG_DAILY_LIMIT) from exc
+    progress = manager.progress(job.id)
+    return GenerationStarted(
+        id=job.id,
+        message=spec.message,
+        width=record["width"],
+        height=record["height"],
+        estimated_seconds=progress["estimated_seconds"] if progress else 0.0,
+    )
 
 
 def _render_text(background, message, style, size_scale, position, font):
