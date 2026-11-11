@@ -260,6 +260,7 @@ def design_text(
     image=None,
     position=None,
     font=None,
+    design=None,
 ):
     """분위기에 맞는 디자인으로 문구만 그린 투명 레이어를 만듭니다.
 
@@ -275,6 +276,8 @@ def design_text(
         image: 문구를 놓을 RGBA 이미지. 없으면 None
         position: 위치 (top, middle, bottom). 비우면 자동
         font: 글꼴 키 (jua, yeonsung, batang, dodum, blackhan). 비우면 분위기 글꼴
+        design: 분위기 디자인 대신 쓸 디자인 dict (DESIGNS 값과 같은 키). 비우면 mood로 고름
+            (AI로 꾸미기의 기본형 글자처럼 장식 없는 글자가 필요할 때)
 
     Returns:
         tuple: (글자 부분만 잘라낸 투명 RGBA 레이어, TextPlacement)
@@ -284,7 +287,7 @@ def design_text(
     """
     check_layout(position, font, size_scale)
     width, height = size
-    d = DESIGNS.get(mood, DESIGNS[DEFAULT_DESIGN])
+    d = design or DESIGNS.get(mood, DESIGNS[DEFAULT_DESIGN])
     if position is None:
         position = calm_area(image) if image is not None else "top"
     box = text_area(position, width, height)
@@ -502,16 +505,31 @@ def place_text(image_bytes, text, mood=None, size_scale=1.0, position=None, font
 
 
 def overlay_text(
-    image_bytes, text, mood=None, size_scale=1.0, position=None, font=None
+    image_bytes,
+    text,
+    mood=None,
+    size_scale=1.0,
+    position=None,
+    font=None,
+    design=None,
 ):
     """문구를 이미지에 얹고, 얹은 이미지와 문구 레이어를 같이 돌려줍니다.
+
+    design: 분위기 디자인 대신 쓸 디자인 (design_text 참고). 비우면 mood로 고름
 
     Returns:
         tuple: (문구를 얹은 PNG 바이트, 문구 레이어 PNG 바이트, TextPlacement)
     """
     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
     layer, placement = design_text(
-        text, mood, image.size, size_scale, image, position=position, font=font
+        text,
+        mood,
+        image.size,
+        size_scale,
+        image,
+        position=position,
+        font=font,
+        design=design,
     )
     canvas = Image.new("RGBA", image.size, (0, 0, 0, 0))
     canvas.paste(layer, (placement.x, placement.y))

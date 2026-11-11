@@ -82,6 +82,47 @@ class FlareImageModel:
             cost_usd=_cost_usd(getattr(response, "usage", None)),
         )
 
+    def edit(self, image_bytes, mask_bytes, prompt, width, height):
+        """그림의 mask 영역만 다시 그립니다 (AI로 꾸미기). OpenAI는 mask의 투명한 곳만 바꿉니다.
+
+        Args:
+            image_bytes: 고칠 그림 PNG
+            mask_bytes: 그림과 같은 크기의 RGBA PNG. 다시 그릴 곳만 투명(알파 0)
+            prompt: 영어 편집 지시
+            width: 가로 크기 (16의 배수로 맞춤)
+            height: 세로 크기 (16의 배수로 맞춤)
+
+        Returns:
+            ImageResult: 편집 결과 (사용 토큰 기준 비용 포함)
+
+        Raises:
+            ImageGenerationError: API 호출 실패 또는 응답에 이미지가 없을 때
+        """
+        start = time.perf_counter()
+        try:
+            client = deadline.openai_client(self.client, "flare")
+            response = client.images.edit(
+                model=self.model,
+                prompt=prompt,
+                image=("image.png", image_bytes, "image/png"),
+                mask=("mask.png", mask_bytes, "image/png"),
+                size=f"{width // 16 * 16}x{height // 16 * 16}",
+                quality=self.quality,
+                n=1,
+            )
+        except Exception as e:
+            raise ImageGenerationError(f"OpenAI 이미지 편집 실패: {e}") from e
+
+        if not response.data or not response.data[0].b64_json:
+            raise ImageGenerationError("OpenAI 응답에 이미지가 없습니다.")
+
+        return ImageResult(
+            image_bytes=base64.b64decode(response.data[0].b64_json),
+            model=self.model,
+            elapsed_sec=round(time.perf_counter() - start, 2),
+            cost_usd=_cost_usd(getattr(response, "usage", None)),
+        )
+
 
 def _cost_usd(usage):
     """사용 토큰으로 예상 비용을 계산합니다. 텍스트 입력과 이미지 입력(참고 사진)은 가격이 달라서 나눠 계산합니다."""
