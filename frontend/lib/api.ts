@@ -74,6 +74,8 @@ const real = {
     }
   },
   getGeneration: (id: string) => call<Generation>(`/generations/${id}`).then(viaProxy),
+  /** AI로 꾸미기: 글자만 OpenAI가 다시 그린 새 결과 시작 (202, 본문 없음) → 새 id */
+  restyle: (id: string) => call<{ id: string }>(`/generations/${id}/restyle`, { method: "POST" }).then((r) => r.id),
   startDetailPage: (b: DetailInput, file?: File | null) =>
     call<{ id: string }>("/detail-pages", { method: "POST", body: toBody(b, file) }).then((r) => r.id),
   getDetailPage: (id: string) =>

@@ -9,6 +9,8 @@ core가 품질 값에 맞는 모델을 고르고, 로컬 모델(klein·Gemma)이
 글자는 서버가 얹는다 (api_spec 5장, 10-22 결정). 단일 이미지는 output="combined"로 받아
 글자 얹은 최종 이미지 + 글자 없는 원본 + text_layout을 함께 저장한다.
 상세페이지 칸은 아직 프론트가 얹으므로 output="image"로 글자 없는 이미지만 받는다.
+AI로 꾸미기(spec.restyle)는 그림을 새로 만들지 않고 core.restyle_text로 글자만 flare가 다시 그린다
+(OpenAI라 detailed 생성기만 받음).
 
 core의 함수 이름이나 인자가 바뀌면 이 파일만 고치면 된다.
 """
@@ -21,7 +23,7 @@ from .base import GeneratorError, ImageGenerator
 logger = logging.getLogger(__name__)
 
 # 품질 값 → 프론트 모델 이름 (DB·로그·/health에 남는 이름)
-MODEL_NAMES = {"fast": "flux2-klein-4b", "detailed": "openai-image-2.5-flare"}
+MODEL_NAMES = {"fast": "flux2-klein-4b", "detailed": "openai-image-2.6-flare"}
 
 
 def _source_of(model: str) -> Source:
@@ -101,6 +103,8 @@ class CoreGenerator(ImageGenerator):
 
         if not self.is_ready:
             raise GeneratorError(f"{self.name} 준비 안 됨: {self._load_error}")
+        if spec.restyle is not None:
+            return self._restyle(spec)
 
         try:
             result = generate_ad_image(
@@ -151,3 +155,51 @@ class CoreGenerator(ImageGenerator):
                 "overlay_ms": int(round(result.overlay_sec * 1000)),
             },
         )
+
+    def _restyle(self, spec: GenerationSpec) -> GenerationOutput:
+        """AI로 꾸미기: 원본의 글자를 flare가 장면에 맞게 다시 그린다 (그림은 그대로)."""
+        from just_make_it.core import ImageGenerationError, restyle_text
+
+        if self.image_quality != "detailed":  # klein은 한글을 못 써서 OpenAI만
+            raise GeneratorError("AI로 꾸미기는 OpenAI 생성기만 처리", retryable=False)
+        layout = spec.restyle.text_layout
+        try:
+            result = restyle_text(
+                spec.restyle.background,
+                spec.message,
+                spec.style,
+                position=layout.get("position"),
+                size_scale=layout.get("size_scale", 1.0),
+            )
+        except ValueError as exc:
+            raise GeneratorError(str(exc), retryable=False) from exc
+        except ImageGenerationError as exc:
+            raise GeneratorError(str(exc)) from exc
+        except Exception as exc:
+            raise GeneratorError(f"{type(exc).__name__}: {exc}") from exc
+
+        width, height = _size_of(result.image_bytes)
+        return GenerationOutput(
+            image_bytes=result.image_bytes,
+            # 글자 없는 원본은 그대로 남겨 글자 고치기(PIL)로 되돌릴 수 있게
+            background_bytes=spec.restyle.background,
+            text_layout=dict(layout),
+            message=spec.message,
+            model=result.model,
+            width=width,
+            height=height,
+            prompt=result.prompt,
+            source=_source_of(result.model),
+            cost_usd=result.cost_usd,
+            text_ms=0,
+            image_ms=int(round(result.elapsed_sec * 1000)),
+            params={"restyle": True, "image_quality": self.image_quality},
+        )
+
+
+def _size_of(png: bytes) -> tuple[int, int]:
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(png)).size

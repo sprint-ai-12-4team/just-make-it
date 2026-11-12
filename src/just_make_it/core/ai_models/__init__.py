@@ -1,7 +1,7 @@
 """파이프라인에서 쓰는 모델 4개를 꺼내 주는 곳.
 
 - 로컬 모델 (VM): Gemma 4 12B (텍스트), FLUX.2 [klein] 4B (이미지)
-- API 모델 (OpenAI): gpt-5.6-luna (텍스트), gpt-image-2.5-flare (이미지)
+- API 모델 (OpenAI): gpt-5.6-luna (텍스트), gpt-image-2.6-flare (이미지)
 
 모델은 처음 부를 때 한 번만 만들고 계속 재사용합니다.
 """
@@ -49,7 +49,7 @@ def get_klein():
 
 
 def get_flare():
-    """API 이미지 모델 gpt-image-2.5-flare를 돌려줍니다.
+    """API 이미지 모델 gpt-image-2.6-flare를 돌려줍니다.
 
     Raises:
         ImageGenerationError: OPENAI_API_KEY가 없을 때

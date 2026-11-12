@@ -558,7 +558,7 @@ def test_detailed_image_model_uses_premium_route(tmp_path):
     premium = RecordingMock(0.01, name="premium")
     with make_client(tmp_path, primary=primary, premium=premium) as client:
         body = client.post(
-            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.5-flare"}
+            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.6-flare"}
         ).json()
     assert route_of(tmp_path, body["id"]) == "premium"
     assert len(premium.specs) == 1 and primary.specs == []
@@ -595,7 +595,7 @@ def test_text_model_maps_to_text_quality(tmp_path):
 def test_detailed_without_api_model_uses_primary(tmp_path):
     with make_client(tmp_path) as client:
         body = client.post(
-            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.5-flare"}
+            "/generate", json={**BASE_BODY, "image_model": "openai-image-2.6-flare"}
         ).json()
     assert route_of(tmp_path, body["id"]) == "primary"
 
@@ -773,7 +773,7 @@ def test_core_detailed_records_openai_cost(tmp_path, fake_core):
             "/generate",
             json={
                 **BASE_BODY,
-                "image_model": "openai-image-2.5-flare",
+                "image_model": "openai-image-2.6-flare",
                 "text_model": "openai-gpt-5.6-luna",
             },
         ).json()

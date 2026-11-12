@@ -1,10 +1,11 @@
 """모델 개발 파트: 광고 이미지 생성 파이프라인 V1.
 
-서빙에서는 이 네 함수만 쓰면 됩니다.
+서빙에서는 이 다섯 함수만 쓰면 됩니다.
 - generate_ad_image: 광고 이미지 생성 (참고 사진 선택)
 - suggest_ad_copies: 광고 문구 3개 추천
 - render_text: 글자 고치기. 글자 없는 원본에 문구, 위치, 글꼴, 크기만 바꿔 다시 얹음 (이미지 재생성 없음)
 - suggest_detail_sections: 상세페이지 5칸 문구 (제목, 설명, 사진 장면)
+- restyle_text: AI로 꾸미기. 만든 이미지의 글자를 flare가 장면에 맞게 다시 그림 (옵션, OpenAI)
 
 받는 형태 output
 - combined (기본값): 문구를 얹은 이미지 + 글자 없는 이미지 + 문구 레이어
@@ -25,14 +26,17 @@ from just_make_it.core.base import ImageGenerationError, TextGenerationError
 from just_make_it.core.copywriter import suggest_ad_copies
 from just_make_it.core.detail_writer import suggest_detail_sections
 from just_make_it.core.pipeline import AdImageResult, generate_ad_image
+from just_make_it.core.restyle import RestyleResult, restyle_text
 from just_make_it.core.text_overlay import render_text
 
 __all__ = [
     "AdImageResult",
     "ImageGenerationError",
+    "RestyleResult",
     "TextGenerationError",
     "generate_ad_image",
     "render_text",
+    "restyle_text",
     "suggest_ad_copies",
     "suggest_detail_sections",
 ]

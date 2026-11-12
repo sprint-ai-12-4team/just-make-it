@@ -41,6 +41,8 @@ class MockGenerator(ImageGenerator):
             time.sleep(self.delay_seconds)
         if self.calls <= self.fail_times:
             raise GeneratorError(f"mock failure #{self.calls}")
+        if spec.restyle is not None:
+            return self._restyle(spec)
 
         width, height = get_image_size(spec.purpose)
         digest = hashlib.md5(f"{spec.product_name}{spec.message}".encode()).digest()
@@ -90,4 +92,29 @@ class MockGenerator(ImageGenerator):
                 "text_quality": spec.text_quality,
                 "keep_product": spec.keep_product,
             },
+        )
+
+    def _restyle(self, spec: GenerationSpec) -> GenerationOutput:
+        """AI로 꾸미기 흉내: OpenAI 대신 꾸미기 전 뼈대(기본형 글자)를 그대로 돌려준다."""
+        from just_make_it.core.restyle import plain_text
+
+        layout = spec.restyle.text_layout
+        image, _ = plain_text(
+            spec.restyle.background,
+            spec.message,
+            layout.get("position") or "top",
+            layout.get("size_scale", 1.0),
+        )
+        width, height = Image.open(io.BytesIO(image)).size
+        return GenerationOutput(
+            image_bytes=image,
+            background_bytes=spec.restyle.background,
+            text_layout=dict(layout),
+            message=spec.message,
+            model=self.name,
+            width=width,
+            height=height,
+            prompt=f"[mock restyle] {spec.message}",
+            cost_usd=0.0,
+            params={"restyle": True},
         )

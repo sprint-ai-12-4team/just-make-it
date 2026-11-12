@@ -206,7 +206,7 @@ def test_stats_eval_fields(tmp_path):
         up = photo_generate(client, "upload").json()["id"]
         photo_generate(client, "stock")
         plain = generate(client)["id"]
-        paid = generate(client, image_model="openai-image-2.5-flare")["id"]
+        paid = generate(client, image_model="openai-image-2.6-flare")["id"]
         generate(client, parent_id=plain)  # plain을 다시 만들기 (원본 사진 없음 → none)
         send_event(client, up, "download")
         stats = client.get("/stats").json()

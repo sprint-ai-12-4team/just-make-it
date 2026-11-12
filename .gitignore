@@ -18,6 +18,9 @@ weights/
 docs/private/
 docs/proposals/
 
+# 설문 자동화 (Google Forms & Scripts)
+tools/survey_automation/
+
 # VS Code
 .vscode/
 !.vscode/extensions.json

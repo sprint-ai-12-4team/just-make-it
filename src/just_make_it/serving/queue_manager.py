@@ -94,6 +94,10 @@ class DailyLimitError(RuntimeError):
     """하루 생성 한도에 도달했을 때."""
 
 
+class ApiUnavailableError(RuntimeError):
+    """OpenAI가 꼭 필요한 작업(AI로 꾸미기)을 지금 받을 수 없을 때 (금액 상한·생성기 없음)."""
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
@@ -449,32 +453,16 @@ class QueueManager:
         async def new_job(
             route: Route, generator: ImageGenerator, reason: str | None = None
         ) -> Job:
-            gid = await asyncio.to_thread(
-                self.records.start,
-                client_id=client_id,
-                spec=spec,
-                parent_id=parent_id,
-                backend=generator.source,
-                model=generator.name,
-                detail_page_id=detail_page_id,
-                section_index=section_index,
-            )
-            if spec.reference_image is not None:
-                await asyncio.to_thread(
-                    self.records.save_reference, gid, spec.reference_image
-                )
-            job = Job(
-                id=gid,
-                spec=spec,
-                route=route,
+            return await self._new_job(
+                spec,
+                route,
+                generator,
                 client_id=client_id,
                 parent_id=parent_id,
                 detail_page_id=detail_page_id,
                 section_index=section_index,
-                fallback_reason=reason,
+                reason=reason,
             )
-            self._active[gid] = job
-            return job
 
         if goes_premium and self.extra_today.take():
             job = await new_job("premium", self.premium)  # type: ignore[arg-type]
@@ -490,6 +478,87 @@ class QueueManager:
 
         job = await new_job("primary", self.primary)
         await self._queue.put(job)
+        return job
+
+    async def submit_restyle(
+        self, spec: GenerationSpec, *, client_id: str, parent_id: str
+    ) -> Job:
+        """AI로 꾸미기 작업을 접수한다. OpenAI(프리미엄 생성기)로만, 로컬 대기열은 거치지 않음.
+
+        새 결과(parent_id = 원본)로 남고 하루 생성 한도·OpenAI 한도(extra)·금액 상한을 같이 쓴다.
+
+        Raises:
+            ApiUnavailableError: 금액 상한을 넘었거나 OpenAI 생성기가 없을 때
+            DailyLimitError: 사용자·전체·OpenAI 하루 한도를 넘었을 때
+        """
+        self._sync_core_fallback()
+        if not (self._usable(self.premium) and self.api_allowed):
+            raise ApiUnavailableError("지금은 OpenAI를 쓸 수 없습니다.")
+        limit = self.settings.client_daily_limit
+        if (
+            limit
+            and await asyncio.to_thread(self.records.count_today, client_id) >= limit
+        ):
+            raise DailyLimitError("사용자 하루 생성 한도에 도달했습니다.")
+        extra = self.extra_today
+        if extra.limit and extra.count >= extra.limit:  # limit 0 = 무제한
+            raise DailyLimitError("오늘 OpenAI 생성 한도에 도달했습니다.")
+        if not self.jobs_today.take():
+            raise DailyLimitError("하루 생성 한도에 도달했습니다.")
+        self.extra_today.take()
+        if spec.keep_product and spec.reference_image is None:
+            # 상품 그대로 결과면 원본의 상품 사진을 이어서 저장 (응답 product_url)
+            reference = await asyncio.to_thread(self.records.load_reference, parent_id)
+            if reference is not None:
+                spec = replace(spec, reference_image=reference)
+        job = await self._new_job(
+            spec,
+            "premium",
+            self.premium,  # type: ignore[arg-type]
+            client_id=client_id,
+            parent_id=parent_id,
+        )
+        self._spawn_extra(job, self.premium)  # type: ignore[arg-type]
+        return job
+
+    async def _new_job(
+        self,
+        spec: GenerationSpec,
+        route: Route,
+        generator: ImageGenerator,
+        *,
+        client_id: str,
+        parent_id: str | None,
+        detail_page_id: str | None = None,
+        section_index: int | None = None,
+        reason: str | None = None,
+    ) -> Job:
+        """processing 행을 만들고 작업을 등록한다 (진행 상황 조회용)."""
+        gid = await asyncio.to_thread(
+            self.records.start,
+            client_id=client_id,
+            spec=spec,
+            parent_id=parent_id,
+            backend=generator.source,
+            model=generator.name,
+            detail_page_id=detail_page_id,
+            section_index=section_index,
+        )
+        if spec.reference_image is not None:
+            await asyncio.to_thread(
+                self.records.save_reference, gid, spec.reference_image
+            )
+        job = Job(
+            id=gid,
+            spec=spec,
+            route=route,
+            client_id=client_id,
+            parent_id=parent_id,
+            detail_page_id=detail_page_id,
+            section_index=section_index,
+            fallback_reason=reason,
+        )
+        self._active[gid] = job
         return job
 
     def _fallback_reason(self, wait_fallback: bool = True) -> str | None:

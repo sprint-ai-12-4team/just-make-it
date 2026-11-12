@@ -31,6 +31,7 @@
 | `GET` | `/generations/{id}/family` | 같은 원본에서 다시 만든 결과 목록 — S2 | ⑤ 나란히 보기·되돌리기 |
 | `POST` | `/generations/{id}/text` | 글자(문구·위치·글꼴·크기)만 바꿔 다시 얹기 | ⑤ 결과 확인 |
 | `POST` | `/generations/{id}/image` | 브라우저에서 고친 그림(배경 지우기·글자)을 서버에 저장 — S7 | ⑤ 결과 확인 |
+| `POST` | `/generations/{id}/restyle` | AI로 꾸미기: 글자를 OpenAI가 장면에 맞게 다시 그림 (새 결과, 비동기) — 11-11 | ⑤ 결과 확인 |
 | `POST` | `/events` | 다운로드·링크 복사·다시 만들기 등 사용 기록 — S4 | ⑤ 결과 확인 |
 | `GET` | `/stats` | 채택률 지표 (생성 · 다운로드 · 직접 고침 · 다시 만들기) — S4 | — (운영·발표) |
 | `GET` | `/tips` | 기다리는 동안 보여 줄 정보 카드 | ④ 대기 |
@@ -94,7 +95,7 @@
 | `adjustments` | string[] | | `[]` | "조금 수정하기" 칩 값 |
 | `parent_id` | string | | `null` | 다시 만들기·수정할 때 원본 결과의 `id` |
 | `consult_id` | string | | `null` | AI 상담에서 넘어왔으면 그 상담 `id` (결과 `input`에 남음, 비교용) |
-| `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.5-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록) |
+| `image_model` | string | | `flux2-klein-4b` | `flux2-klein-4b` · `openai-image-2.6-flare`. 로컬이 바쁘면 서버가 OpenAI로 넘길 수 있음 (`source`로 기록). 예전 값 `openai-image-2.5-flare`도 받아서 2.6으로 저장 (11-11, core flare 2.6) |
 | `reference_image` | file | | | 상품 사진. **multipart일 때만**. PNG·JPG·WEBP, 10MB 이하 |
 | `reference_source` | string | | `null` | 참고 사진 출처: `upload` 직접 올림 · `stock` Pixabay에서 고름 · `null` 사진 없음 ([아래](#reference_source--참고-사진-출처)) |
 | `keep_product` | bool | | `false` | 상품 사진 그대로, 배경 장면만 AI ([아래](#keep_product--내-상품-사진-그대로-배경만-ai로-s1)). `true`면 배경을 지운 `reference_image` 필수 |
@@ -216,6 +217,7 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 - `status`: `success` | `processing` | `error`
 - `input`: 요청값 중 `purpose`·`product_name`·`message`·`style`·`adjustments` + 있으면 `consult_id`·`keep_product`·`reference_source`
   - **`image_model` 추가 요청 (11-09, 서빙)**: 다시 만들기가 처음 고른 품질을 이어 쓰도록. 예전 결과는 `null`. FE는 없으면 `flux2-klein-4b`로 봄
+  - `restyle`: AI로 꾸미기로 만든 결과면 `true` (기본 `false`). `POST /generations/{id}/restyle` 참고
 - 없는 `id`면 `404`
 - 글자를 고쳤으면 고친 뒤의 `image_url`·`message`·`text_layout`이 옴 (링크 공유도 최신 상태)
 - `processing`이면 `progress`가 함께 옴 (V3). 그 밖에는 `null`
@@ -299,6 +301,26 @@ AI가 상품을 다시 그리면 모양·로고가 바뀌므로, 상품은 사�
 - 없는 `id` `404`, `processing`·`error`인 결과 `409`, 10MB 초과 `413`, PNG가 아니면 `415`, `image`가 없으면 `422`
 - `text_layout`은 그대로 둠 (서버 글자 고치기의 처음 값)
 - ponytail: 지금은 아무나 링크만 알면 덮어쓸 수 있음 (`/text`와 같음). 로그인(S3) 때 `client_id` 확인 추가
+
+### `POST /generations/{id}/restyle` — AI로 꾸미기 (11-11)
+
+결과 화면의 선택 버튼. 기본 결과(klein 배경 + 서버 PIL 글자)를 만든 뒤, 사용자가 원하면 **글자만** OpenAI(flare)가 장면에 맞는 글씨체·색·효과로 다시 그립니다. 그림(배경)은 그대로. 글자 표현 실험(11-04~09)에서 채택한 `flare_restyle` 방식.
+
+**요청** — 본문 없음. 헤더 `X-Client-Id`(선택). 원본 결과의 **지금** 문구·위치·크기를 씀 (글자 고치기를 했으면 고친 값)
+
+**응답** `202` — `POST /generations`와 같은 형식
+
+```json
+{"id": "c3...", "status": "processing", "message": "신메뉴 출시", "width": 1024, "height": 1024, "estimated_seconds": 25.0}
+```
+
+- 결과는 `GET /generations/{id}`로 조회 (2초 폴링, `progress` 포함). 보통 20~40초
+- **새 결과**로 남음: `parent_id` = 원본, `input.restyle` = `true`, `source` = `openai`. 원본은 그대로라 `family`에서 나란히 보기·되돌리기 가능
+- `background_url`·`text_layout`은 원본 값을 그대로 줌
+- 꾸민 글자는 **그림에 박혀서 옮길 수 없음**. 꾸민 결과에서 글자 고치기(`/text`·canvas)를 하면 `background_url` 위에 다시 얹으므로 기본 글자로 돌아감 → 화면에서 "글자를 고치면 꾸미기가 풀려요" 안내 권장
+- OpenAI만 씀(로컬 대기열 안 거침). 하루 생성 한도·OpenAI 한도(`EXTRA_DAILY_LIMIT`)·하루 금액 상한에 같이 셈. 1장 약 $0.04
+- 없는 `id` `404`, `processing`·`error`이거나 글자 없는 원본이 없는 결과(예전 결과·상세페이지 칸) `409`, 한도 초과 `429`, OpenAI를 쓸 수 없음(금액 상한 초과 등) `503` (`지금은 AI로 꾸미기를 쓸 수 없어요. 잠시 후 다시 시도해 주세요.`)
+- 분위기(`style`)는 "가게가 원하는 느낌" 힌트로만 넘김. 분위기별 디자인 묘사는 넣지 않음 (넣으면 PIL 디자인을 따라감)
 
 ### `POST /events` — 사용 기록 (S4)
 
@@ -600,12 +622,12 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 |------|------|---------------|
 | `400` | 필수값이 비어 있음 | `상품 이름과 핵심 메시지는 꼭 입력해야 합니다.` |
 | `404` | 없는 결과 ID | `결과를 찾을 수 없어요.` |
-| `409` | 상세페이지가 이미 진행 중 / 아직 안 끝난 결과의 글자 고치기 | `만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요.` |
+| `409` | 상세페이지가 이미 진행 중 / 아직 안 끝난 결과의 글자 고치기·AI로 꾸미기 | `만들고 있는 상세페이지가 있어요. 끝나면 다시 시도해 주세요.` |
 | `413` | 참고 사진이 10MB 초과 | `사진은 10MB 이하로 올려 주세요.` |
 | `415` | PNG·JPG·WEBP가 아닌 사진 | `참고 사진은 PNG, JPG, WEBP 파일만 사용할 수 있습니다.` |
 | `422` | 타입·허용값 오류 (FastAPI 자동) | — |
 | `429` | 일일 생성 한도 초과 (한도 미정) | `오늘 만들 수 있는 횟수를 다 썼어요.` |
-| `503` | 로컬·OpenAI 모두 실패 | `잠시 후 다시 시도해 주세요.` |
+| `503` | 로컬·OpenAI 모두 실패 / AI로 꾸미기에서 OpenAI를 쓸 수 없음 | `잠시 후 다시 시도해 주세요.` |
 
 - 프론트는 `503`이면 재시도 버튼을 보여줌.
 - 내부 예외 메시지(API 키, 스택 등)는 `detail`에 넣지 않음.
@@ -633,6 +655,7 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 - 이유: 글자 디자인(테두리·그림자·장식·기울기)을 서버 한 곳에서만 그림 → 미리보기 = 다운로드 = 공유 이미지. 프론트 canvas와 결과가 어긋나지 않음
 - `generation_mode`는 계속 **삭제** 상태 (항상 글자를 얹음). `글자 더 크게` 칩은 `size_scale: 1.25`로 대체
 - 상세페이지 섹션은 아직 프론트 canvas로 얹음 (단일 이미지 먼저 적용)
+- **AI로 꾸미기 (11-11 결정)**: 기본 결과를 먼저 만든 뒤 옵션으로 `POST /generations/{id}/restyle`. OpenAI가 글자만 장면에 맞게 다시 그린 새 결과를 만듦. 글자는 그림에 박혀 옮길 수 없으므로 기본 결과(옮기기·고치기 가능)는 그대로 두고 고르게 함
 
 ### `text_layout` — 글자 위치·글꼴·크기
 
@@ -675,7 +698,7 @@ FE가 `/create?consult=<id>`에서 `brief`로 칸을 채우고, 만들기 요청
 ### 닫힘 (요약)
 
 - 저장소: VM 로컬 디스크 (SQLite + `$DATA_DIR/images`, 만료 없음). 상세페이지는 `detail_pages` + `generations` 행 (`docs/schema.sql`)
-- 모델 선택: `image_model`·`text_model` 고정 목록, `GET /models`는 상주 모델이 바뀔 때. OpenAI 강제는 `image_model: openai-image-2.5-flare`로 대신함
+- 모델 선택: `image_model`·`text_model` 고정 목록, `GET /models`는 상주 모델이 바뀔 때. OpenAI 강제는 `image_model: openai-image-2.6-flare`로 대신함
 - 글자: 서버가 얹고, 자유 위치·단어별 편집은 프론트 canvas → `/image` 저장 (11-04). `text_layout`에 `x`·`y` 없음
 - 다시 만들기 사진: 서버가 `parent_id`의 참고 사진 재사용
 - 사용 기록·고친 그림 저장·같은 원본 목록·`keep_product`·비동기 생성: 서빙·프론트 모두 반영 (10-28 ~ 11-04)
