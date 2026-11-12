@@ -156,9 +156,17 @@ flowchart LR
 
 ## 🍩 시연 페이지
 
-프로젝트 기간에만 일시적으로 운영되는 페이지입니다.
+프로젝트 기간(~2026.11.15)에만 일시적으로 운영되는 페이지입니다.
 
 👉 [JUST-MAKE-IT Web UI](https://just-make-it-ten.vercel.app)
+
+---
+
+## 📈 팀 프로젝트 보고서
+
+👉🏼 <a href="https://drive.google.com/file/d/1lyKs7oK8rUc03kvDeGjURxBh7PUgDg7s/view?usp=sharing">
+    <img src="https://thumb.wikimedia.org/wikipedia/commons/thumb/1/12/Google_Drive_icon_%282020%29.svg/120px-Google_Drive_icon_%282020%29.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail&_=20221103153031" alt="Google Drive" height="16" /> 보고서
+   </a>
 
 ---
 
