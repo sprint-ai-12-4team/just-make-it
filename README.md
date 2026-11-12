@@ -302,5 +302,7 @@ uv run pytest tests/ -v
 
 - 모델 가중치 (저장소에 포함하지 않음): FLUX.2 klein 4B, Gemma 4 — 각 모델 카드의 라이선스 (둘 다 Apache 2.0)
 - OpenAI API 출력: OpenAI 이용 약관
-- 글꼴 (`core/assets/fonts`, `frontend/public/fonts`): 주아, 연성, 고운바탕, 고운돋움, 검은고딕 — SIL Open Font License 1.1
+- 글꼴 (`core/assets/fonts`, `frontend/public/fonts`)
+  - 주아, 연성, 고운바탕, 고운돋움, 검은고딕, 가색, 우아한세리프, 빗썸고딕, 학교안심 — SIL Open Font License 1.1
+  - 잘난체2, 잘난고딕, 리아신스, 스텔라체는 각각의 독자 라이선스 적용됨(상업 허용 범위 내 사용)
 - 참고 사진 후보: Pixabay Content License
