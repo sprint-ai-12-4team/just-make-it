@@ -106,3 +106,12 @@ body {
 @font-face { font-family: "GowunBatang"; src: url("/fonts/GowunBatang-Bold.woff") format("woff"); font-display: swap; }
 @font-face { font-family: "GowunDodum"; src: url("/fonts/GowunDodum.woff") format("woff"); font-display: swap; }
 @font-face { font-family: "BlackHanSans"; src: url("/fonts/BlackHanSans.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "GasoekOne"; src: url("/fonts/GasoekOne.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "GraceSerif"; src: url("/fonts/GraceSerif.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "BithumbGothic"; src: url("/fonts/BithumbGothic.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "BithumbGothicOriginal"; src: url("/fonts/BithumbGothicOriginal.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "HakgyoansimPoster"; src: url("/fonts/HakgyoansimPoster.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "Jalnan2"; src: url("/fonts/Jalnan2.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "JalnanGothic"; src: url("/fonts/JalnanGothic.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "RiaSans"; src: url("/fonts/RiaSans.woff") format("woff"); font-display: swap; }
+@font-face { font-family: "StellarSerif"; src: url("/fonts/StellarSerif.woff") format("woff"); font-display: swap; }

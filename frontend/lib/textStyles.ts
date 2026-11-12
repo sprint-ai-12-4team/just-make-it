@@ -96,6 +96,15 @@ export const FONTS = [
   { id: "GowunBatang", name: "고운바탕" },
   { id: "GowunDodum", name: "고운돋움" },
   { id: "BlackHanSans", name: "검은고딕" },
+  { id: "GasoekOne", name: "가색" },
+  { id: "GraceSerif", name: "우아한세리프" },
+  { id: "BithumbGothic", name: "빗썸고딕" },
+  { id: "BithumbGothicOriginal", name: "빗썸고딕(기울임)" },
+  { id: "HakgyoansimPoster", name: "학교안심 포스터" },
+  { id: "Jalnan2", name: "잘난체2" },
+  { id: "JalnanGothic", name: "잘난고딕" },
+  { id: "RiaSans", name: "리아산스" },
+  { id: "StellarSerif", name: "스텔라체" },
 ];
 
 const styleOf = (id?: string) => TEXT_STYLES.find((t) => t.id === id) ?? TEXT_STYLES[0];
